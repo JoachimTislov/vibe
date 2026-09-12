@@ -1,0 +1,155 @@
+syntax = "proto3";
+
+package core.v1;
+
+option go_package = "github.com/YOURNAME/agentic-gateway/gen/core/v1;corev1";
+
+// AdapterGateway is the entire core<->adapter contract. Adapters are
+// separate processes; this service definition is the only thing they
+// compile against. Keep changes additive-only: new fields get new tag
+// numbers, new message kinds get new oneof variants. Never repurpose an
+// existing field or tag number.
+service AdapterGateway {
+  // Connect is a single long-lived bidirectional stream per adapter
+  // process. The adapter sends a Hello first, then a stream of inbound
+  // events; the core replies with a stream of outbound commands
+  // (including approval requests) on the same connection. Using one
+  // stream (vs. unary RPCs) lets the core push to the adapter without
+  // the adapter polling.
+  rpc Connect(stream AdapterEnvelope) returns (stream CoreEnvelope);
+}
+
+// ---- Adapter -> Core ----
+
+message AdapterEnvelope {
+  oneof payload {
+    Hello hello = 1;
+    InboundMessage inbound_message = 2;
+    ApprovalResponse approval_response = 3;
+    Ack ack = 4;
+    CapabilityResult capability_result = 5;
+  }
+}
+
+// Sent once, immediately after connecting. Identifies the adapter and its
+// contract version so the core can reject an incompatible adapter cleanly
+// instead of failing on the first real message.
+message Hello {
+  string adapter_name = 1;      // e.g. "slack", "telegram", "discord"
+  string adapter_version = 2;   // adapter's own build version, for logs
+  string contract_version = 3;  // semver of proto/core/v1 this adapter was built against
+  string principal_id = 4;
+  bool provides_model = 5;
+  repeated Tool tools = 6;
+}
+
+message InboundMessage {
+  string principal_id = 1;      // whose request this is; single value today,
+                                 // required on every message regardless
+  string conversation_id = 2;   // adapter-scoped conversation/thread identifier
+  string platform_message_id = 3;
+  string text = 4;
+  repeated Attachment attachments = 5;
+  int64 received_at_unix_ms = 6;
+}
+
+message Attachment {
+  string kind = 1;   // "image", "file", "link", etc. — intentionally a
+                      // string, not an enum, so new kinds don't require a
+                      // schema change
+  string uri = 2;
+  string display_name = 3;
+}
+
+// Adapter's answer to a CoreEnvelope.ApprovalRequest.
+message ApprovalResponse {
+  string approval_id = 1;
+  bool approved = 2;
+  string note = 3;  // optional human-provided context, e.g. "no, use staging"
+  string principal_id = 4;
+  string conversation_id = 5;
+}
+
+// Generic delivery acknowledgement, used for both directions' at-least-once
+// delivery bookkeeping.
+message Ack {
+  string envelope_id = 1;
+}
+
+// ---- Core -> Adapter ----
+
+message CoreEnvelope {
+  oneof payload {
+    HelloAck hello_ack = 1;
+    OutboundMessage outbound_message = 2;
+    ApprovalRequest approval_request = 3;
+    Ack ack = 4;
+    CapabilityRequest capability_request = 5;
+  }
+}
+
+message HelloAck {
+  bool accepted = 1;
+  string reason = 2;  // populated when accepted == false, e.g. version mismatch
+}
+
+message OutboundMessage {
+  string conversation_id = 1;
+  string text = 2;
+  repeated Attachment attachments = 3;
+  string in_reply_to_platform_message_id = 4;
+  string principal_id = 5;
+  string error_code = 6;
+}
+
+// A state-changing action that requires an explicit human decision before
+// the core proceeds. This is the structural enforcement point referenced in
+// SOURCE_OF_TRUTH.md — the core does not offer a code path to skip this for
+// an action classified as state-changing.
+message ApprovalRequest {
+  string approval_id = 1;
+  string conversation_id = 2;
+  string action_summary = 3;   // human-readable, shown verbatim to the user
+  string action_kind = 4;      // e.g. "send_email", "run_shell", "publish_post"
+  int64 expires_at_unix_ms = 5;
+  string principal_id = 6;
+  string in_reply_to_platform_message_id = 7;
+}
+
+// The core requests model/API/MCP work through the originating client.
+message Tool {
+  string name = 1;
+  string description = 2;
+  string input_schema_json = 3;
+}
+message ToolCall {
+  string name = 1;
+  string arguments_json = 2;
+}
+message ChatMessage {
+  string role = 1;
+  string content = 2;
+  repeated ToolCall tool_calls = 3;
+  string tool_name = 4;
+}
+message CapabilityRequest {
+  string request_id = 1;
+  string principal_id = 2;
+  string conversation_id = 3;
+  oneof operation {
+    ModelRequest model = 4;
+    ToolCall tool_call = 5;
+  }
+}
+message ModelRequest {
+  repeated ChatMessage messages = 1;
+  repeated Tool tools = 2;
+}
+message CapabilityResult {
+  string request_id = 1;
+  string principal_id = 2;
+  string conversation_id = 3;
+  string error = 4;
+  ChatMessage message = 5;
+  string tool_output = 6;
+}
