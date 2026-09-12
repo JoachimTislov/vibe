@@ -206,6 +206,9 @@ func doctor(ctx context.Context, cfg config.Config, store credentials.Store) err
 			} else if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
 				failed = true
 				fmt.Println("MISSING/INCOMPATIBLE: Telegram profile must be a private regular file")
+			} else if dirInfo, dirErr := os.Stat(filepath.Dir(cfg.Telegram.ConfigFile)); dirErr != nil || !dirInfo.IsDir() || dirInfo.Mode().Perm()&0077 != 0 {
+				failed = true
+				fmt.Println("MISSING/INCOMPATIBLE: Telegram profile directory must be private")
 			}
 		}
 	}

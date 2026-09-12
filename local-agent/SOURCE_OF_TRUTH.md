@@ -69,6 +69,9 @@ link it from here.
 - [done]    MCP bridge in both directions through clients: consume stdio/HTTP tools and expose the core through stdio `ask` with elicitation approvals
 - [idea]    Local internet access (fetch/scrape) as a bounded, host-tier
             capability
+- [planned] Grocery list (`add`, `list`, `delete`) exposed through Telegram,
+            using allowlisted open-source scrapers and approval-gated writes —
+            see EXTENSIONS.md #grocery
 - [non-goal, permanent] Personal-account social media automation (auto-DM,
             auto-follow, feed scraping) on platforms whose ToS forbid it.
             Business/creator API integrations (Meta Graph API, LinkedIn

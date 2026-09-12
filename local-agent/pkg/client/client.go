@@ -9,6 +9,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -31,6 +33,13 @@ type Client struct {
 }
 
 func Dial(ctx context.Context, socket, principal, name string, runtime Runtime) (*Client, error) {
+	dirInfo, err := os.Stat(filepath.Dir(socket))
+	if err != nil {
+		return nil, errors.New("core socket directory is unavailable")
+	}
+	if !dirInfo.IsDir() || dirInfo.Mode().Perm()&0077 != 0 {
+		return nil, errors.New("core socket directory must be private")
+	}
 	conn, err := grpc.NewClient("passthrough:///core", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 	}), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(2<<20), grpc.MaxCallSendMsgSize(2<<20)))

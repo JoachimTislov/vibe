@@ -14,6 +14,7 @@ func EnsureTelegramProfile(path string) error {
 	if !filepath.IsAbs(path) {
 		return errors.New("Telegram profile path must be absolute")
 	}
+	dir := filepath.Dir(path)
 	if info, err := os.Lstat(path); err == nil {
 		if !info.Mode().IsRegular() {
 			return errors.New("Telegram profile must be a regular file")
@@ -21,11 +22,17 @@ func EnsureTelegramProfile(path string) error {
 		if info.Mode().Perm()&0077 != 0 {
 			return errors.New("Telegram profile must be private (mode 0600)")
 		}
+		if dirInfo, dirErr := os.Stat(dir); dirErr == nil {
+			if !dirInfo.IsDir() || dirInfo.Mode().Perm()&0077 != 0 {
+				return errors.New("Telegram profile directory must be private (mode 0700)")
+			}
+		} else if !errors.Is(dirErr, os.ErrNotExist) {
+			return dirErr
+		}
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}

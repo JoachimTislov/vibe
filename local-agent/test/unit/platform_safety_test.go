@@ -50,6 +50,23 @@ func TestTelegramProfileRejectsInsecureExistingFile(t *testing.T) {
 	}
 }
 
+func TestTelegramProfileRejectsInsecureExistingDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "profile")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config")
+	if err := os.WriteFile(path, []byte("existing"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.EnsureTelegramProfile(path); err == nil {
+		t.Fatal("Telegram profile in an insecure directory was accepted")
+	}
+}
+
 func TestModelCredentialsRequireSecureEndpoint(t *testing.T) {
 	for _, endpoint := range []string{"http://remote.example", "https://user:pass@example.com", "file:///tmp/model", "http://127.0.0.1@evil.example"} {
 		if runtime.ValidateEndpoint(endpoint) == nil {

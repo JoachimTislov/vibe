@@ -51,6 +51,17 @@ func NewTelegram(cfg config.Telegram) (*Telegram, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, errors.New("could not inspect Telegram profile")
 	}
+	// The CLI creates authentication/session files beside this config. An
+	// existing profile directory must therefore be private as well. A missing
+	// directory is allowed here because `agent login telegram` creates it with
+	// mode 0700 before the first interactive login.
+	if info, err := os.Stat(filepath.Dir(cfg.ConfigFile)); err == nil {
+		if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+			return nil, errors.New("Telegram profile directory must be private")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, errors.New("could not inspect Telegram profile directory")
+	}
 	for _, peer := range cfg.Peers {
 		if !regexp.MustCompile(`^(user|chat|channel):[1-9][0-9]*$`).MatchString(peer) {
 			return nil, errors.New("Telegram peers use user:123, chat:123, or channel:123")

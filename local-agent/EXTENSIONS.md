@@ -114,6 +114,82 @@ rate limiting from target sites, proxy services (Bright Data, ScraperAPI) or
 a Cloudflare Worker as a caching fetch layer are the standard mitigations —
 not needed at low volume, worth knowing before it becomes a problem.
 
+## #grocery — Telegram grocery list and allowlisted site lookup
+
+**What**: expose a dedicated `/grocery` command in the Telegram adapter with
+three explicit operations: `add`, `list`, and `delete`. The list is scoped to
+the authenticated principal and a stable item ID. `list` is read-only;
+`add` and `delete` are state changes that must pass the existing core approval
+gate before they are committed. A future `search` operation may query selected
+grocery websites, but Telegram text or model output must never choose an
+arbitrary URL.
+
+**Reuse existing free/open-source tooling**: use [Colly](https://github.com/gocolly/colly)
+for bounded HTTP collection and [goquery](https://github.com/PuerkitoBio/goquery)
+for HTML/CSS-selector parsing. Use [chromedp](https://github.com/chromedp/chromedp)
+only for an explicitly allowlisted site that requires JavaScript rendering;
+the default path must remain a plain HTTP fetch. Pin reviewed versions and
+licenses in `go.mod`; do not copy a scraper wholesale or introduce a generic
+"scrape any URL" tool.
+
+**Site registry and access policy**:
+
+- Onboarding selects named sites from an operator-maintained registry. Each
+  site has an exact HTTPS origin, parser version, rate limit, and capabilities
+  (`search`/read and, only if explicitly enabled, cart/list write).
+- Scraping runs in the client/adapter process or an MCP tool, never in the
+  core. Requests are limited to registered origins and known paths; redirects,
+  private-network targets, arbitrary headers, and model-supplied URLs are
+  rejected. Responses are size-limited, cached, and stripped of credentials
+  before reaching the model or Telegram.
+- Per-site login/session material is held in the OS keychain or the selected
+  site's private session store. It is never placed in `config.local.json`, the
+  grocery database, Telegram text, logs, or tool arguments.
+- A site write action must display the site, item IDs, quantities, and the
+  exact mutation in the approval prompt. Adding to a cart is distinct from
+  placing an order; checkout, payment, address changes, and automatic
+  purchasing are out of scope until explicitly designed and separately gated.
+
+**Data and command design**:
+
+- Store items locally in a small, mode-0600 durable store keyed by
+  `principal_id`; do not make a website account the source of truth for the
+  grocery list. An item has an opaque ID, normalized name, quantity/unit,
+  notes, optional site/product reference, and timestamps.
+- Telegram accepts `/grocery add <name> [quantity]`, `/grocery list`, and
+  `/grocery delete <item-id>`. Natural-language prompts may be a convenience
+  later, but the explicit command grammar remains the unambiguous entrypoint.
+- Unknown commands, ambiguous delete names, non-owner senders, and peers not
+  selected during onboarding are rejected without contacting a website.
+- The core should receive a structured additive capability request rather
+  than a raw URL or shell command. The Telegram adapter formats deterministic
+  replies; it does not directly mutate storage or bypass approval.
+
+**Delivery plan**:
+
+1. Define `GroceryItem`, `GroceryAction`, and a bounded store interface;
+   implement add/list/delete against a local test store with unit tests for
+   principal isolation, duplicate IDs, and delete ambiguity.
+2. Add a durable local store and onboarding fields for enabling grocery,
+   selecting Telegram peers, and selecting named website capabilities. Keep
+   existing configs valid through additive fields.
+3. Add Telegram command parsing and a fixture E2E whose entrypoint is the
+   Telegram CLI protocol. Assert owner filtering, list output, approval before
+   add/delete, denial behavior, and that no website request occurs for local
+   list operations.
+4. Add one source-derived allowlisted website fixture using Colly/goquery.
+   Test search parsing, redirect/URL rejection, rate limits, credential
+   redaction, and an approved cart mutation; never use a real shopping account
+   in deterministic tests.
+5. Add optional operator-run live checks for one configured site, with an
+   explicit dry-run default and a separate confirmation before any external
+   write.
+
+**Why deferred**: durable state, site-specific parsers, authentication
+sessions, and write approvals are materially different risk surfaces from the
+current prompt/reply gateway. Implement the local list and fixture contract
+first; do not add generic web scraping or purchasing as a shortcut.
+
 ## Template for new entries
 
 ```

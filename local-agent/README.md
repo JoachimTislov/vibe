@@ -7,6 +7,9 @@ MCP, and platform connections: the core needs no internet access or credentials.
 
 ## Start here
 
+For a fresh installation, follow [ONBOARDING.md](ONBOARDING.md). The short
+path below is useful once the prerequisites and account profiles are ready.
+
 Requirements: Go 1.25+, an OS keychain (Secret Service on Linux), and a model
 provider. Neovim is required for the complete test suite. Generated protobuf
 sources are included; `protoc` is only needed to change the wire contract.
@@ -83,6 +86,15 @@ Use **[vysheng/tg](https://github.com/vysheng/tg)**, whose binary is
 `telegram-cli`. Build with JSON and libconfig support. The adapter uses its
 `--json` events and `-S` Unix command socket; it does not substitute another
 Telegram library or CLI.
+
+Compatibility warning: `vysheng/tg` is a legacy `telegram-cli` codebase with
+old native build dependencies and no modern release/support cadence. The
+selected checkout builds and reaches its interactive login prompt with the
+documented compatibility flags, but this repository has not claimed live
+account delivery or production support for it. For a maintained personal/
+bot MTProto implementation, evaluate [gotd/td](https://github.com/gotd/td)
+before deploying beyond a controlled operator environment; switching clients
+requires preserving the adapter's tested event and command-socket contract.
 
 This selected upstream has legacy build dependencies. With a current OpenSSL
 toolchain, its bundled RSA code may not compile; the upstream-supported

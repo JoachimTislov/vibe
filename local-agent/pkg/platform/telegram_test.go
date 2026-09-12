@@ -25,3 +25,21 @@ func TestNewTelegramRejectsInsecureExistingProfile(t *testing.T) {
 		t.Fatal("insecure Telegram profile was accepted")
 	}
 }
+
+func TestNewTelegramRejectsInsecureProfileDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "profile")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config")
+	if err := os.WriteFile(path, []byte("config_directory = \"/tmp\";\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewTelegram(config.Telegram{UserID: 42, ConfigFile: path, Peers: []string{"user:42"}})
+	if err == nil {
+		t.Fatal("Telegram profile in an insecure directory was accepted")
+	}
+}

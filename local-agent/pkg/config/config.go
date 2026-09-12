@@ -57,6 +57,16 @@ func Load(path string) (Config, error) {
 	if path == "" {
 		return c, nil
 	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return c, err
+	}
+	if !info.Mode().IsRegular() {
+		return c, errors.New("config must be a regular file")
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		return c, errors.New("config must be private (mode 0600)")
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return c, err

@@ -24,6 +24,8 @@ type Options struct {
 	ApprovalTimeout time.Duration
 }
 
+var errPrivateSocketDirectory = errors.New("core socket directory must be private")
+
 // Server owns orchestration; it never constructs an internet client.
 type Server struct {
 	pb.UnimplementedAdapterGatewayServer
@@ -277,8 +279,16 @@ func Listen(ctx context.Context, socketPath string, srv *Server) error {
 	if srv == nil {
 		return errors.New("server is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
+	dir := filepath.Dir(socketPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+		return errPrivateSocketDirectory
 	}
 	lis, err := net.Listen("unix", socketPath)
 	if err != nil {
