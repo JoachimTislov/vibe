@@ -1,0 +1,314 @@
+version: '3.8'
+
+# Development deployment - All services with hot-reload
+# Extends the infrastructure stack
+
+include:
+  - docker-compose.infra.yml
+
+services:
+  # User Service
+  user-service:
+    build:
+      context: .
+      dockerfile: services/user-service/Dockerfile
+    container_name: girly-user-service
+    environment:
+      MICRONAUT_ENVIRONMENTS: dev
+      MICRONAUT_APPLICATION_NAME: user-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: girly
+      DATABASE_PASSWORD: girly2024
+      DATABASE_SCHEMA: user_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: dev-secret-please-change-in-production
+      TRAEFIK_TAGS: user-service
+    ports:
+      - "8001:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.user-service.rule=PathPrefix(`/api/v1/users`, `/api/v1/auth`)"
+      - "traefik.http.routers.user-service.entrypoints=web"
+      - "traefik.http.services.user-service.loadbalancer.server.port=8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Pet Service
+  pet-service:
+    build:
+      context: .
+      dockerfile: services/pet-service/Dockerfile
+    container_name: girly-pet-service
+    environment:
+      MICRONAUT_ENVIRONMENTS: dev
+      MICRONAUT_APPLICATION_NAME: pet-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: girly
+      DATABASE_PASSWORD: girly2024
+      DATABASE_SCHEMA: pet_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      TRAEFIK_TAGS: pet-service
+    ports:
+      - "8002:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pet-service.rule=PathPrefix(`/api/v1/pets`, `/api/v1/virtual-pets`)"
+      - "traefik.http.routers.pet-service.entrypoints=web"
+      - "traefik.http.services.pet-service.loadbalancer.server.port=8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Wardrobe Service
+  wardrobe-service:
+    build:
+      context: .
+      dockerfile: services/wardrobe-service/Dockerfile
+    container_name: girly-wardrobe-service
+    environment:
+      MICRONAUT_ENVIRONMENTS: dev
+      MICRONAUT_APPLICATION_NAME: wardrobe-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: girly
+      DATABASE_PASSWORD: girly2024
+      DATABASE_SCHEMA: wardrobe_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      TRAEFIK_TAGS: wardrobe-service
+    ports:
+      - "8003:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wardrobe-service.rule=PathPrefix(`/api/v1/wardrobe`, `/api/v1/clothes`, `/api/v1/outfits`)"
+      - "traefik.http.routers.wardrobe-service.entrypoints=web"
+      - "traefik.http.services.wardrobe-service.loadbalancer.server.port=8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Makeup Service
+  makeup-service:
+    build:
+      context: .
+      dockerfile: services/makeup-service/Dockerfile
+    container_name: girly-makeup-service
+    environment:
+      MICRONAUT_ENVIRONMENTS: dev
+      MICRONAUT_APPLICATION_NAME: makeup-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: girly
+      DATABASE_PASSWORD: girly2024
+      DATABASE_SCHEMA: makeup_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      TRAEFIK_TAGS: makeup-service
+    ports:
+      - "8004:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.makeup-service.rule=PathPrefix(`/api/v1/makeup`, `/api/v1/beauty`)"
+      - "traefik.http.routers.makeup-service.entrypoints=web"
+      - "traefik.http.services.makeup-service.loadbalancer.server.port=8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Drama Service
+  drama-service:
+    build:
+      context: .
+      dockerfile: services/drama-service/Dockerfile
+    container_name: girly-drama-service
+    environment:
+      MICRONAUT_ENVIRONMENTS: dev
+      MICRONAUT_APPLICATION_NAME: drama-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: girly
+      DATABASE_PASSWORD: girly2024
+      DATABASE_SCHEMA: drama_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      TRAEFIK_TAGS: drama-service
+    ports:
+      - "8005:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.drama-service.rule=PathPrefix(`/api/v1/drama`, `/api/v1/simulations`)"
+      - "traefik.http.routers.drama-service.entrypoints=web"
+      - "traefik.http.services.drama-service.loadbalancer.server.port=8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Social Service
+  social-service:
+    build:
+      context: .
+      dockerfile: services/social-service/Dockerfile
+    container_name: girly-social-service
+    environment:
+      MICRONAUT_ENVIRONMENTS: dev
+      MICRONAUT_APPLICATION_NAME: social-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: girly
+      DATABASE_PASSWORD: girly2024
+      DATABASE_SCHEMA: social_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      PET_SERVICE_URL: http://pet-service:8080
+      TRAEFIK_TAGS: social-service
+    ports:
+      - "8006:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.social-service.rule=PathPrefix(`/api/v1/social`, `/api/v1/games`, `/api/v1/friends`)"
+      - "traefik.http.routers.social-service.entrypoints=web"
+      - "traefik.http.services.social-service.loadbalancer.server.port=8080"
+      - "traefik.http.routers.social-service-webSocket.rule=PathPrefix(`/ws/games`)"
+      - "traefik.http.routers.social-service-webSocket.entrypoints=web"
+      - "traefik.http.routers.social-service-webSocket.service=social-service"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Mood Service
+  mood-service:
+    build:
+      context: .
+      dockerfile: services/mood-service/Dockerfile
+    container_name: girly-mood-service
+    environment:
+      MICRONAUT_ENVIRONMENTS: dev
+      MICRONAUT_APPLICATION_NAME: mood-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: girly
+      DATABASE_PASSWORD: girly2024
+      DATABASE_SCHEMA: mood_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      TRAEFIK_TAGS: mood-service
+    ports:
+      - "8007:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mood-service.rule=PathPrefix(`/api/v1/mood`, `/api/v1/emotions`, `/api/v1/journal`)"
+      - "traefik.http.routers.mood-service.entrypoints=web"
+      - "traefik.http.services.mood-service.loadbalancer.server.port=8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Aggregate Service
+  aggregate-service:
+    build:
+      context: .
+      dockerfile: services/aggregate-service/Dockerfile
+    container_name: girly-aggregate-service
+    environment:
+      MICRONAUT_ENVIRONMENTS: dev
+      MICRONAUT_APPLICATION_NAME: aggregate-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: girly
+      DATABASE_PASSWORD: girly2024
+      DATABASE_SCHEMA: aggregate_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      PET_SERVICE_URL: http://pet-service:8080
+      WARDROBE_SERVICE_URL: http://wardrobe-service:8080
+      MAKEUP_SERVICE_URL: http://makeup-service:8080
+      DRAMA_SERVICE_URL: http://drama-service:8080
+      SOCIAL_SERVICE_URL: http://social-service:8080
+      MOOD_SERVICE_URL: http://mood-service:8080
+      TRAEFIK_TAGS: aggregate-service
+    ports:
+      - "8008:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.aggregate-service.rule=PathPrefix(`/api/v1/aggregate`, `/api/v1/dashboard`, `/api/v1/analytics`)"
+      - "traefik.http.routers.aggregate-service.entrypoints=web"
+      - "traefik.http.services.aggregate-service.loadbalancer.server.port=8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+      pet-service:
+        condition: service_started
+      wardrobe-service:
+        condition: service_started
+    restart: unless-stopped
+
+  # API Gateway (Optional - for advanced routing)
+  api-gateway:
+    image: nginx:alpine
+    container_name: girly-api-gateway
+    ports:
+      - "8000:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api-gateway.rule=PathPrefix(`/api`)"
+      - "traefik.http.routers.api-gateway.entrypoints=web"
+    depends_on:
+      user-service:
+        condition: service_started
+      pet-service:
+        condition: service_started
+    restart: unless-stopped
+
+networks:
+  girly-network:
+    external: true
+    name: girly-network

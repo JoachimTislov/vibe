@@ -1,0 +1,142 @@
+version: '3.8'
+
+# Infrastructure services for Girly Microservices Platform
+# These are the foundational services that all microservices depend on
+
+services:
+  # PostgreSQL Database - Single instance with multiple schemas
+  postgres:
+    image: postgres:15-alpine
+    container_name: girly-postgres
+    environment:
+      POSTGRES_USER: girly
+      POSTGRES_PASSWORD: girly2024
+      POSTGRES_DB: girly
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init-schemas.sql:/docker-entrypoint-initdb.d/01-init-schemas.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U girly -d girly"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - girly-network
+    restart: unless-stopped
+
+  # Traefik Reverse Proxy - Ingress controller
+  traefik:
+    image: traefik:v2.10
+    container_name: girly-traefik
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.traefik.address=:8080"
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+      - "--log.level=INFO"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"  # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.localhost`)"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.entrypoints=web"
+    restart: unless-stopped
+
+  # Redis for caching, sessions, and pub/sub
+  redis:
+    image: redis:7-alpine
+    container_name: girly-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - girly-network
+    restart: unless-stopped
+
+  # Prometheus for monitoring
+  prometheus:
+    image: prom/prometheus:v2.47
+    container_name: girly-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.prometheus.rule=Host(`prometheus.localhost`)"
+      - "traefik.http.routers.prometheus.entrypoints=web"
+    restart: unless-stopped
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:10.2
+    container_name: girly-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: girly2024
+      GF_USERS_ALLOW_SIGN_UP: false
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`grafana.localhost`)"
+      - "traefik.http.routers.grafana.entrypoints=web"
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+  # Consul for service discovery (optional)
+  consul:
+    image: consul:1.17
+    container_name: girly-consul
+    ports:
+      - "8500:8500"
+    command: "consul agent -server -bootstrap-expect=1 -ui -client=0.0.0.0"
+    networks:
+      - girly-network
+    restart: unless-stopped
+
+networks:
+  girly-network:
+    driver: bridge
+    name: girly-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

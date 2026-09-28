@@ -1,0 +1,62 @@
+plugins {
+    id 'java-library'
+    id 'io.micronaut.library' version '4.3.0'
+}
+
+micronaut {
+    version = '4.3.3'
+    processing {
+        incremental = true
+        annotations "com.girly.db.*"
+    }
+}
+
+group = 'com.girly'
+version = '0.1.0-SNAPSHOT'
+
+description = 'Girly Database Library - Database access, connection pooling, and schema management'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+dependencies {
+    // Micronaut Data
+    implementation "io.micronaut.data:micronaut-data-jpa:$micronautVersion"
+    implementation "io.micronaut.data:micronaut-data-hibernate-jpa:$micronautVersion"
+    
+    // JDBC
+    implementation "org.postgresql:postgresql:$jdbcVersion"
+    implementation "com.zaxxer:HikariCP:$hikariVersion"
+    
+    // JPA/Hibernate
+    implementation "org.hibernate:hibernate-core:$jpaVersion"
+    
+    // Micronaut core
+    implementation "io.micronaut:micronaut-inject:$micronautVersion"
+    implementation "io.micronaut:micronaut-runtime:$micronautVersion"
+    
+    // Common library
+    implementation project(':lib:girly-common')
+    
+    // Lombok (optional)
+    compileOnly "org.projectlombok:lombok:$lombokVersion"
+    annotationProcessor "org.projectlombok:lombok:$lombokVersion"
+    
+    // Testing
+    testImplementation "org.junit.jupiter:junit-jupiter-api:$junitVersion"
+    testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine:$junitVersion"
+    testImplementation "org.testcontainers:junit-jupiter:$testcontainersVersion"
+    testImplementation "org.testcontainers:postgresql:$testcontainersVersion"
+    testImplementation "org.mockito:mockito-core:5.5.0"
+}
+
+test {
+    useJUnitPlatform()
+}

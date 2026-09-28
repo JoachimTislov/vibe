@@ -1,0 +1,470 @@
+version: '3.8'
+
+# Production deployment configuration
+# Uses production-ready settings and optimizations
+
+include:
+  - docker-compose.infra.yml
+
+services:
+  # User Service - Production
+  user-service:
+    image: girly/user-service:latest
+    container_name: girly-user-service-prod
+    environment:
+      MICRONAUT_ENVIRONMENTS: prod
+      MICRONAUT_APPLICATION_NAME: user-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: ${DB_USER:girly}
+      DATABASE_PASSWORD: ${DB_PASSWORD:girly2024}
+      DATABASE_SCHEMA: user_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: ${JWT_SECRET}
+      LOG_LEVEL: INFO
+    ports:
+      - "8001:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.user-service.rule=PathPrefix(`/api/v1/users`, `/api/v1/auth`)"
+      - "traefik.http.routers.user-service.entrypoints=websecure"
+      - "traefik.http.routers.user-service.tls=true"
+      - "traefik.http.services.user-service.loadbalancer.server.port=8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Pet Service - Production
+  pet-service:
+    image: girly/pet-service:latest
+    container_name: girly-pet-service-prod
+    environment:
+      MICRONAUT_ENVIRONMENTS: prod
+      MICRONAUT_APPLICATION_NAME: pet-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: ${DB_USER:girly}
+      DATABASE_PASSWORD: ${DB_PASSWORD:girly2024}
+      DATABASE_SCHEMA: pet_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      LOG_LEVEL: INFO
+    ports:
+      - "8002:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pet-service.rule=PathPrefix(`/api/v1/pets`)"
+      - "traefik.http.routers.pet-service.entrypoints=websecure"
+      - "traefik.http.routers.pet-service.tls=true"
+      - "traefik.http.services.pet-service.loadbalancer.server.port=8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Wardrobe Service - Production
+  wardrobe-service:
+    image: girly/wardrobe-service:latest
+    container_name: girly-wardrobe-service-prod
+    environment:
+      MICRONAUT_ENVIRONMENTS: prod
+      MICRONAUT_APPLICATION_NAME: wardrobe-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: ${DB_USER:girly}
+      DATABASE_PASSWORD: ${DB_PASSWORD:girly2024}
+      DATABASE_SCHEMA: wardrobe_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      LOG_LEVEL: INFO
+    ports:
+      - "8003:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.wardrobe-service.rule=PathPrefix(`/api/v1/wardrobe`, `/api/v1/clothes`, `/api/v1/outfits`)"
+      - "traefik.http.routers.wardrobe-service.entrypoints=websecure"
+      - "traefik.http.routers.wardrobe-service.tls=true"
+      - "traefik.http.services.wardrobe-service.loadbalancer.server.port=8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 768M
+        reservations:
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Makeup Service - Production
+  makeup-service:
+    image: girly/makeup-service:latest
+    container_name: girly-makeup-service-prod
+    environment:
+      MICRONAUT_ENVIRONMENTS: prod
+      MICRONAUT_APPLICATION_NAME: makeup-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: ${DB_USER:girly}
+      DATABASE_PASSWORD: ${DB_PASSWORD:girly2024}
+      DATABASE_SCHEMA: makeup_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      LOG_LEVEL: INFO
+    ports:
+      - "8004:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.makeup-service.rule=PathPrefix(`/api/v1/makeup`, `/api/v1/beauty`)"
+      - "traefik.http.routers.makeup-service.entrypoints=websecure"
+      - "traefik.http.routers.makeup-service.tls=true"
+      - "traefik.http.services.makeup-service.loadbalancer.server.port=8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 768M
+        reservations:
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Drama Service - Production
+  drama-service:
+    image: girly/drama-service:latest
+    container_name: girly-drama-service-prod
+    environment:
+      MICRONAUT_ENVIRONMENTS: prod
+      MICRONAUT_APPLICATION_NAME: drama-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: ${DB_USER:girly}
+      DATABASE_PASSWORD: ${DB_PASSWORD:girly2024}
+      DATABASE_SCHEMA: drama_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      LOG_LEVEL: INFO
+    ports:
+      - "8005:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.drama-service.rule=PathPrefix(`/api/v1/drama`, `/api/v1/simulations`)"
+      - "traefik.http.routers.drama-service.entrypoints=websecure"
+      - "traefik.http.routers.drama-service.tls=true"
+      - "traefik.http.services.drama-service.loadbalancer.server.port=8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.75'
+          memory: 1G
+        reservations:
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Social Service - Production
+  social-service:
+    image: girly/social-service:latest
+    container_name: girly-social-service-prod
+    environment:
+      MICRONAUT_ENVIRONMENTS: prod
+      MICRONAUT_APPLICATION_NAME: social-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: ${DB_USER:girly}
+      DATABASE_PASSWORD: ${DB_PASSWORD:girly2024}
+      DATABASE_SCHEMA: social_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      PET_SERVICE_URL: http://pet-service:8080
+      LOG_LEVEL: INFO
+    ports:
+      - "8006:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.social-service.rule=PathPrefix(`/api/v1/social`, `/api/v1/games`, `/api/v1/friends`)"
+      - "traefik.http.routers.social-service.entrypoints=websecure"
+      - "traefik.http.routers.social-service.tls=true"
+      - "traefik.http.services.social-service.loadbalancer.server.port=8080"
+      - "traefik.http.routers.social-service-webSocket.rule=PathPrefix(`/ws`)"
+      - "traefik.http.routers.social-service-webSocket.entrypoints=websecure"
+      - "traefik.http.routers.social-service-webSocket.tls=true"
+      - "traefik.http.services.social-service.loadbalancer.server.port=8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+      pet-service:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Mood Service - Production
+  mood-service:
+    image: girly/mood-service:latest
+    container_name: girly-mood-service-prod
+    environment:
+      MICRONAUT_ENVIRONMENTS: prod
+      MICRONAUT_APPLICATION_NAME: mood-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: ${DB_USER:girly}
+      DATABASE_PASSWORD: ${DB_PASSWORD:girly2024}
+      DATABASE_SCHEMA: mood_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      LOG_LEVEL: INFO
+    ports:
+      - "8007:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mood-service.rule=PathPrefix(`/api/v1/mood`, `/api/v1/emotions`, `/api/v1/journal`)"
+      - "traefik.http.routers.mood-service.entrypoints=websecure"
+      - "traefik.http.routers.mood-service.tls=true"
+      - "traefik.http.services.mood-service.loadbalancer.server.port=8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          memory: 256M
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Aggregate Service - Production
+  aggregate-service:
+    image: girly/aggregate-service:latest
+    container_name: girly-aggregate-service-prod
+    environment:
+      MICRONAUT_ENVIRONMENTS: prod
+      MICRONAUT_APPLICATION_NAME: aggregate-service
+      DATABASE_URL: jdbc:postgresql://postgres:5432/girly
+      DATABASE_USER: ${DB_USER:girly}
+      DATABASE_PASSWORD: ${DB_PASSWORD:girly2024}
+      DATABASE_SCHEMA: aggregate_svc
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8080
+      PET_SERVICE_URL: http://pet-service:8080
+      WARDROBE_SERVICE_URL: http://wardrobe-service:8080
+      MAKEUP_SERVICE_URL: http://makeup-service:8080
+      DRAMA_SERVICE_URL: http://drama-service:8080
+      SOCIAL_SERVICE_URL: http://social-service:8080
+      MOOD_SERVICE_URL: http://mood-service:8080
+      LOG_LEVEL: INFO
+    ports:
+      - "8008:8080"
+    networks:
+      - girly-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.aggregate-service.rule=PathPrefix(`/api/v1/aggregate`, `/api/v1/dashboard`, `/api/v1/analytics`)"
+      - "traefik.http.routers.aggregate-service.entrypoints=websecure"
+      - "traefik.http.routers.aggregate-service.tls=true"
+      - "traefik.http.services.aggregate-service.loadbalancer.server.port=8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.75'
+          memory: 1G
+        reservations:
+          memory: 512M
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+      pet-service:
+        condition: service_started
+      wardrobe-service:
+        condition: service_started
+      makeup-service:
+        condition: service_started
+      drama-service:
+        condition: service_started
+      social-service:
+        condition: service_started
+      mood-service:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Traefik Configuration for Production
+  traefik:
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.traefik.address=:8080"
+      - "--api.dashboard=true"
+      - "--api.insecure=false"
+      - "--api.dashboard.auth.basic.users=${TRAEFIK_USER}:${TRAEFIK_HASHED_PASSWORD}"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--log.level=INFO"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.girly.tech`)"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls=true"
+      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.http-catchall.rule=HostRegexp(`{any:.+}`)"
+      - "traefik.http.routers.http-catchall.entrypoints=web"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+
+networks:
+  girly-network:
+    external: true
+    name: girly-network

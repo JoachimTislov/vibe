@@ -1,0 +1,182 @@
+// Girly Microservices - Root Build Configuration
+// Parent build file for all modules
+
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.2.0' // For potential Spring Boot services
+}
+
+// Common configuration for all subprojects
+subprojects {
+    apply plugin: 'java'
+    apply plugin: 'io.micronaut.application' // Will be applied in subprojects
+    
+    group = 'com.girly'
+    version = '0.1.0-SNAPSHOT'
+    
+    repositories {
+        mavenCentral()
+    }
+    
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(17)
+        }
+    }
+    
+    configurations {
+        compileOnly {
+            extendFrom annotationProcessor
+        }
+    }
+    
+    test {
+        useJUnitPlatform()
+    }
+}
+
+// Define dependency versions for consistency
+.ext {
+    // Micronaut
+    micronautVersion = '4.3.3'
+    
+    // Database
+    jdbcVersion = '42.7.3' // PostgreSQL JDBC
+    hikariVersion = '5.1.0'
+    jpaVersion = '3.1.0'
+    
+    // Testing
+    junitVersion = '5.10.0'
+    testcontainersVersion = '1.19.3'
+    
+    // JSON
+    jacksonVersion = '2.16.1'
+    
+    // Logging
+    logbackVersion = '1.4.14'
+    
+    // API Documentation
+    swaggerVersion = '2.2.18'
+    
+    // Validation
+    javaxValidationVersion = '2.0.1.Final'
+    micronautValidationVersion = '4.3.0'
+    
+    // Security
+    jwtVersion = '4.4.3'
+    
+    // gRPC
+    grpcVersion = '1.60.0'
+    
+    // WebSocket
+    websocketVersion = '1.5.3'
+    
+    // Redis
+    redisVersion = '4.3.7'
+    
+    // Lombok (optional)
+    lombokVersion = '1.18.30'
+}
+
+// Configure the build script classpath
+buildscript {
+    repositories {
+        mavenCentral()
+        gradlePluginPortal()
+    }
+    
+    dependencies {
+        classpath "io.micronaut:micronaut-gradle-plugin:$micronautVersion"
+        classpath "org.springframework.boot:spring-boot-gradle-plugin:3.2.0"
+    }
+}
+
+// Define common dependencies that services can use
+ext {
+    // Micronaut
+    micronautAnnotationProcessor = "io.micronaut:micronaut-inject-java:$micronautVersion"
+    micronautHttpClient = "io.micronaut:micronaut-http-client:$micronautVersion"
+    micronautRuntime = "io.micronaut:micronaut-runtime:$micronautVersion"
+    micronautValidation = "io.micronaut:micronaut-validation:$micronautValidationVersion"
+    
+    // Database
+    postgresql = "org.postgresql:postgresql:$jdbcVersion"
+    hikariCp = "com.zaxxer:HikariCP:$hikariVersion"
+    
+    // Micronaut Data
+    micronautDataJpa = "io.micronaut.data:micronaut-data-jpa:$micronautVersion"
+    micronautDataHibernate = "io.micronaut.data:micronaut-data-hibernate-jpa:$micronautVersion"
+    
+    // Testing
+    junitJupiter = "org.junit.jupiter:junit-jupiter-api:$junitVersion"
+    junitJupiterEngine = "org.junit.jupiter:junit-jupiter-engine:$junitVersion"
+    testcontainersJupiter = "org.testcontainers:junit-jupiter:$testcontainersVersion"
+    testcontainersPostgres = "org.testcontainers:postgresql:$testcontainersVersion"
+    
+    // JSON
+    jacksonDatabind = "com.fasterxml.jackson.core:jackson-databind:$jacksonVersion"
+    
+    // Security
+    micronautSecurity = "io.micronaut.security:micronaut-security:$micronautVersion"
+    micronautSecurityJwt = "io.micronaut.security:micronaut-security-jwt:$micronautVersion"
+    
+    // gRPC
+    grpcNetty = "io.grpc:grpc-netty:$grpcVersion"
+    grpcProtobuf = "io.grpc:grpc-protobuf:$grpcVersion"
+    grpcStub = "io.grpc:grpc-stub:$grpcVersion"
+    
+    // WebSocket
+    micronautWebsocket = "io.micronaut.websocket:micronaut-websocket:$micronautVersion"
+    
+    // Redis
+    micronautRedis = "io.micronaut.data:micronaut-data-redis:$micronautVersion"
+    
+    // Swagger
+    micronautSwagger = "io.micronaut.swagger:micronaut-swagger:$swaggerVersion"
+}
+
+// Task to build all services
+task buildAll {
+    description = 'Build all Girly microservices'
+    group = 'build'
+    
+    dependsOn subprojects.build
+    
+    doLast {
+        println "\n✓ All Girly services built successfully!"
+    }
+}
+
+// Task to run all services
+task runAll(type: GradleBuild) {
+    description = 'Run all Girly microservices'
+    group = 'application'
+    
+    for (subproject in subprojects) {
+        if (subproject.name.contains('service')) {
+            tasks.getByName(subproject.path).dependsOn subproject.tasks.findByName('run')
+        }
+    }
+}
+
+// Task to stop all services
+task stopAll {
+    description = 'Stop all running Girly microservices'
+    group = 'application'
+    
+    doLast {
+        println "Stopping all Girly services..."
+        // This would need to be implemented with proper process management
+    }
+}
+
+// Task to generate OpenAPI documentation
+task generateDocs {
+    description = 'Generate OpenAPI documentation for all services'
+    group = 'documentation'
+    
+    doLast {
+        println "Generating documentation..."
+        // Would call swagger generation for each service
+    }
+}

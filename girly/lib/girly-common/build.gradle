@@ -1,0 +1,57 @@
+plugins {
+    id 'java-library'
+    id 'io.micronaut.library' version '4.3.0'
+}
+
+micronaut {
+    version = '4.3.3'
+    processing {
+        incremental = true
+        annotations "com.girly.common.*"
+    }
+}
+
+group = 'com.girly'
+version = '0.1.0-SNAPSHOT'
+
+description = 'Girly Common Library - Shared utilities and helpers for all microservices'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+dependencies {
+    // Micronaut
+    implementation "io.micronaut:micronaut-inject:$micronautVersion"
+    implementation "io.micronaut:micronaut-runtime:$micronautVersion"
+    
+    // Logging
+    implementation "ch.qos.logback:logback-classic:$logbackVersion"
+    
+    // JSON
+    implementation "com.fasterxml.jackson.core:jackson-databind:$jacksonVersion"
+    
+    // Validation
+    implementation "javax.validation:validation-api:$javaxValidationVersion"
+    implementation "io.micronaut:micronaut-validation:$micronautValidationVersion"
+    
+    // Lombok (optional)
+    compileOnly "org.projectlombok:lombok:$lombokVersion"
+    annotationProcessor "org.projectlombok:lombok:$lombokVersion"
+    
+    // Testing
+    testImplementation "org.junit.jupiter:junit-jupiter-api:$junitVersion"
+    testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine:$junitVersion"
+    testImplementation "org.mockito:mockito-core:5.5.0"
+    testImplementation "org.mockito:mockito-junit-jupiter:5.5.0"
+}
+
+test {
+    useJUnitPlatform()
+}

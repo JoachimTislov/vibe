@@ -1,0 +1,48 @@
+// Girly Microservices - Gradle Settings
+// Defines all projects in the multi-module build
+
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+dependencyResolutionManagement {
+    repositories {
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'girly'
+
+// Include common libraries
+include 'lib:girly-common'
+include 'lib:girly-db'
+include 'lib:girly-models'
+include 'lib:girly-events'
+
+// Include all microservices
+include 'services:user-service'
+include 'services:pet-service'
+include 'services:wardrobe-service'
+include 'services:makeup-service'
+include 'services:drama-service'
+include 'services:social-service'
+include 'services:mood-service'
+include 'services:aggregate-service'
+
+// Configure project directories
+project(':lib:girly-common').projectDir = file('lib/girly-common')
+project(':lib:girly-db').projectDir = file('lib/girly-db')
+project(':lib:girly-models').projectDir = file('lib/girly-models')
+project(':lib:girly-events').projectDir = file('lib/girly-events')
+
+project(':services:user-service').projectDir = file('services/user-service')
+project(':services:pet-service').projectDir = file('services/pet-service')
+project(':services:wardrobe-service').projectDir = file('services/wardrobe-service')
+project(':services:makeup-service').projectDir = file('services/makeup-service')
+project(':services:drama-service').projectDir = file('services/drama-service')
+project(':services:social-service').projectDir = file('services/social-service')
+project(':services:mood-service').projectDir = file('services/mood-service')
+project(':services:aggregate-service').projectDir = file('services/aggregate-service')
