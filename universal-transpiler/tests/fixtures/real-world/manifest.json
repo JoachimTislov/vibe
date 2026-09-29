@@ -1,0 +1,70 @@
+{
+  "description": "Real-world source fixtures fetched via curl from raw.githubusercontent.com from well-known open-source projects. Used to prove the UniversalEngine against real online code and to keep future tests hermetic (no network needed at test time).",
+  "fetchedAt": "2026-09-29",
+  "files": [
+    {
+      "file": "go-hello.go",
+      "language": "go",
+      "sourceUrl": "https://raw.githubusercontent.com/golang/example/master/hello/hello.go",
+      "project": "golang/example (official Go example programs)",
+      "license": "BSD-3-Clause",
+      "expectedBehavior": "Detected as Go CLI/command domain; routed to native `go run`. NOTE: this real file imports golang.org/x/example/hello/reverse, an external module that is not part of the file, so compilation inside the engine's synthetic module is expected to fail with a missing-module error (honest negative result)."
+    },
+    {
+      "file": "go-hello-gotypes.go",
+      "language": "go",
+      "sourceUrl": "https://raw.githubusercontent.com/golang/example/master/gotypes/hello/hello.go",
+      "project": "golang/example (official Go example programs)",
+      "license": "BSD-3-Clause",
+      "expectedBehavior": "Self-contained Go program (imports only fmt); native-run route; prints `Hello, 世界` and exits 0."
+    },
+    {
+      "file": "js-linear-search.js",
+      "language": "javascript",
+      "sourceUrl": "https://raw.githubusercontent.com/TheAlgorithms/JavaScript/master/Search/LinearSearch.js",
+      "project": "TheAlgorithms/JavaScript",
+      "license": "MIT",
+      "expectedBehavior": "Self-contained ES module util (linear search); native-run route with node; the module loads cleanly and exits 0 with no stdout (the file only defines and exports functions; its demo calls are commented out upstream)."
+    },
+    {
+      "file": "java-luhn.java",
+      "language": "java",
+      "sourceUrl": "https://raw.githubusercontent.com/TheAlgorithms/Java/master/src/main/java/com/thealgorithms/others/Luhn.java",
+      "project": "TheAlgorithms/Java",
+      "license": "MIT",
+      "expectedBehavior": "Self-contained Java class with a main method implementing the Luhn checksum; declares `package com.thealgorithms.others;`. The engine places the source at <workdir>/com/thealgorithms/others/Luhn.java (package-aware placement) and runs the fully-qualified class on the JVM; the Luhn usage examples print to stdout. Verified by tests/real-world.test.ts."
+    },
+    {
+      "file": "java-radix-sort.java",
+      "language": "java",
+      "sourceUrl": "https://raw.githubusercontent.com/TheAlgorithms/Java/8c78d90d496ba91db9907608b85333265a647ea2/radixSort.java",
+      "project": "TheAlgorithms/Java (historical revision 8c78d90, 2017, before the package restructure)",
+      "license": "MIT",
+      "expectedBehavior": "Self-contained Java file with a main method (no package declaration); native-run route via JDK single-file source mode; sorts {170, 45, 75, 90, 802, 24, 2, 66} and prints the sorted numbers."
+    },
+    {
+      "file": "rust-hello.rs",
+      "language": "rust",
+      "sourceUrl": "https://raw.githubusercontent.com/rust-lang/rustlings/main/exercises/00_intro/intro1.rs",
+      "project": "rust-lang/rustlings",
+      "license": "MIT",
+      "transpile": {
+        "from": "rust",
+        "to": "go"
+      },
+      "expectedBehavior": "Real Rust intro exercise printing a Rustlings ASCII banner via println!, including r#\"...\"# raw strings. No rustc on this machine, so the engine routes transpile-then-run through the structural rust->go converter (raw strings are converted to Go quoted strings; leaked Rust-isms are reported in structuralReport.unsupported) and executes the output with Go, printing the real Rustlings banner. Verified by tests/real-world.test.ts."
+    },
+    {
+      "file": "haskell-bubble-sort.hs",
+      "language": "haskell",
+      "sourceUrl": "https://raw.githubusercontent.com/TheAlgorithms/Haskell/master/src/Sorts/BubbleSort.hs",
+      "project": "TheAlgorithms/Haskell",
+      "license": "MIT",
+      "transpile": {
+        "from": "haskell",
+        "to": "javascript"
+      },
+      "expectedBehavior": "Real Haskell module with a main = do block implementing bubble sort with where-clauses and pattern matching; no ghc on this machine, so the engine must route transpile-then-run via the structural haskell->javascript converter and run the output with node; guards/where/multiple-equation functions are beyond the simple structural converter, so partial conversion is expected (structuralReport.converted/unsupported tells the truth)."
+    }
+  ]
+}

@@ -124,7 +124,14 @@ let engine: UniversalEngine;
 let registry: ToolchainRegistry;
 
 beforeAll(async () => {
-  engine = new UniversalEngine({ debug: false, timeoutMs: 60_000 });
+  // Hermetic: a temp state file per suite so learned keywords and promoted
+  // feedback can never leak between test runs.
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'univ-engine-state-'));
+  engine = new UniversalEngine({
+    debug: false,
+    timeoutMs: 60_000,
+    statePath: path.join(stateDir, 'state.json'),
+  });
   registry = engine.toolchains;
   await registry.probeAll();
 });

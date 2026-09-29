@@ -29,6 +29,8 @@ import {
   type DomainAnalysisResult,
 } from '../domains/domain-analyzer';
 import { TranspileMatrix, type MatrixTranspileResult } from './transpile-matrix';
+import { PersistentState, getSharedState } from './persistent-state';
+import type { FeedbackRecord, Goal } from './persistent-state';
 import type { LLMClient } from '../core/universal-transpiler';
 
 export interface EngineOptions {
@@ -37,6 +39,16 @@ export interface EngineOptions {
   defaultPlatform?: PlatformTarget;
   debug?: boolean;
   timeoutMs?: number;
+  /**
+   * Persistent state file. Defaults to ~/.universal-transpiler/state.json.
+   * Learned keyword definitions, client feedback, promoted upstream
+   * preferences and progress goals are persisted here.
+   */
+  statePath?: string;
+  /** Learning options forwarded to the persistent state */
+  learn?: { minEncounters?: number; minDominance?: number; minKeywordLength?: number };
+  /** Disable learning entirely (state still loads and records) */
+  enableLearning?: boolean;
 }
 
 export interface EngineRunRequest extends RunOptions {
@@ -46,6 +58,12 @@ export interface EngineRunRequest extends RunOptions {
   domain?: string;
   /** Declared target platform; domain/framework analysis used when absent */
   platform?: PlatformTarget;
+  /**
+   * Identifies the client/subscriber. Per-client feedback (not yet
+   * promoted upstream) applies to this client only; once promoted it
+   * affects every client.
+   */
+  clientId?: string;
 }
 
 export interface EngineRunReport {
@@ -88,15 +106,29 @@ export interface EngineAnalyzeReport {
 export class UniversalEngine {
   readonly toolchains: ToolchainRegistry;
   readonly matrix: TranspileMatrix;
-  private options: Required<Omit<EngineOptions, 'llm'>> & { llm?: LLMClient };
+  /** Persistent, self-going state: learned definitions, feedback, goals. */
+  readonly state: PersistentState;
+  private options: Required<Omit<EngineOptions, 'llm' | 'statePath' | 'learn'>> & {
+    llm?: LLMClient;
+    statePath?: string;
+    learn?: EngineOptions['learn'];
+  };
 
   constructor(options: EngineOptions = {}) {
     this.toolchains = new ToolchainRegistry();
     this.matrix = new TranspileMatrix(this.toolchains, options.llm);
+
+    // Persistent state: shared machine-wide file unless overridden
+    this.state = options.statePath
+      ? new PersistentState(options.statePath, options.learn)
+      : getSharedState();
+    this.state.load();
+
     this.options = {
       defaultPlatform: 'auto',
       debug: false,
       timeoutMs: 60_000,
+      enableLearning: true,
       ...options,
     };
   }
@@ -122,13 +154,33 @@ export class UniversalEngine {
       notes.push(`language auto-detected as ${language}`);
     }
 
-    // 2. Domain analysis (keywords + declared)
+    // 2. Domain analysis, informed by persistent state:
+    //    - learned keyword definitions score alongside builtins
+    //    - upstream platform preferences (promoted client feedback)
+    //    - unpromoted per-client feedback applies to that client only
+    if (request.clientId) this.state.touchClient(request.clientId);
+    const clientOverrides = this.clientPlatformOverrides(request.clientId);
+    // Keyword-domain feedback teaches a definition. Unpromoted feedback
+    // applies to the client that gave it; promoted feedback already lives
+    // in state.keywords and applies to everyone.
+    const clientKeywords = this.clientKeywordDefinitions(request.clientId);
     const analysis = analyzeDomain({
       source,
       declaredDomain: request.domain,
       declaredPlatform: request.platform || (this.options.defaultPlatform as PlatformTarget),
       language,
+      learnedKeywords: { ...this.state.learnedKeywordMap(), ...clientKeywords },
+      platformOverrides: this.validatedPlatformOverrides({
+        ...this.state.data.upstream.platformPreferences,
+        ...clientOverrides,
+      }),
     });
+
+    // 3. Learn from this encounter: new keywords are noted and, once
+    //    confirmed across encounters, persisted as definitions.
+    if (this.options.enableLearning) {
+      this.state.learnFromSource(source, language);
+    }
 
     // 3. Routing: native vs transpile
     const tc = this.toolchains.forLanguage(language);
@@ -224,6 +276,9 @@ export class UniversalEngine {
       platform: this.platformForLanguage(fallbackTarget),
       timeoutMs: request.timeoutMs || this.options.timeoutMs,
     });
+
+    // Record empirical evidence in the persistent state
+    this.state.noteTranspile(`${language}->${fallbackTarget}`, transpilation.strategy, runResult.ok);
 
     return {
       result: runResult,
@@ -351,6 +406,234 @@ export class UniversalEngine {
     });
 
     return { project, result };
+  }
+
+  // ==========================================================================
+  // Client feedback (moved upstream on promotion)
+  // ==========================================================================
+
+  /**
+   * Record a client's feedback. Feedback lives on the client profile; once
+   * the same feedback arrives from enough clients (or is approved), it is
+   * promoted upstream into the shared definitions and applies to everyone.
+   *
+   * Value formats:
+   *   platform-preference: "web-backend=native"        (domain=platform)
+   *   output-style:        "go=explicit-types"          (scope=style)
+   *   keyword-domain:      "wasm_bindgen=wasm"          (keyword=domain)
+   *   transpile-pair / general: free-form value
+   */
+  feedback(
+    clientId: string,
+    subject: FeedbackRecord['subject'],
+    value: string,
+    options: { approve?: boolean } = {}
+  ): FeedbackRecord {
+    return this.state.recordFeedback(clientId, subject, value, options);
+  }
+
+  /** Explicitly promote a feedback value upstream (applies to all clients). */
+  promoteUpstream(subject: FeedbackRecord['subject'], value: string): void {
+    this.state.promoteFeedback(subject, value);
+  }
+
+  /** Client profiles with their feedback records. */
+  clients(): Record<string, { requests: number; feedback: FeedbackRecord[] }> {
+    const out: Record<string, { requests: number; feedback: FeedbackRecord[] }> = {};
+    for (const [id, profile] of Object.entries(this.state.data.clients)) {
+      out[id] = { requests: profile.requests, feedback: profile.feedback };
+    }
+    return out;
+  }
+
+  // ==========================================================================
+  // Progress goals (the internal roadmap)
+  // ==========================================================================
+
+  defineGoal(title: string, notes?: string): Goal {
+    return this.state.defineGoal(title, notes);
+  }
+
+  startGoal(goalId: string): void {
+    this.state.startGoal(goalId);
+  }
+
+  completeGoal(goalId: string, notes?: string): void {
+    this.state.completeGoal(goalId, notes);
+  }
+
+  goals(): Goal[] {
+    return this.state.data.goals;
+  }
+
+  progressLog(limit = 50): { at: number; kind: string; detail: string }[] {
+    return this.state.data.progressLog.slice(-limit);
+  }
+
+  /**
+   * The self-going loop: advance planned goals the engine knows how to
+   * satisfy on its own. Recognized goal titles:
+   *   - "verify-transpile-pairs": exercise every structural transpile pair
+   *     with a built-in sample and record the outcome in the persistent
+   *     state (success rates become empirical evidence).
+   *   - "promote-pending-feedback": run the upstream promotion sweep.
+   *   - "run-hello-world-per-language": run a hello-world through every
+   *     available native toolchain.
+   * Unknown goals are left for the caller (or an LLM turn) to handle.
+   */
+  async autoAdvance(): Promise<{ advanced: string[]; stillPlanned: string[] }> {
+    const advanced: string[] = [];
+    const stillPlanned: string[] = [];
+
+    for (const goal of this.state.data.goals) {
+      if (goal.status !== 'planned') continue;
+
+      const known =
+        goal.title === 'verify-transpile-pairs' ||
+        goal.title === 'promote-pending-feedback' ||
+        goal.title === 'run-hello-world-per-language';
+
+      // Unknown goals remain 'planned' — available for the caller or a
+      // future strategy (e.g. an LLM turn) to pick up.
+      if (!known) {
+        stillPlanned.push(goal.title);
+        continue;
+      }
+
+      this.state.startGoal(goal.id);
+      try {
+        if (goal.title === 'verify-transpile-pairs') {
+          await this.goalVerifyTranspilePairs();
+          this.state.completeGoal(goal.id, 'all structural pairs exercised');
+        } else if (goal.title === 'promote-pending-feedback') {
+          this.goalPromotePendingFeedback();
+          this.state.completeGoal(goal.id, 'promotion sweep complete');
+        } else if (goal.title === 'run-hello-world-per-language') {
+          const results = await this.goalRunHelloWorlds();
+          this.state.completeGoal(goal.id, results);
+        }
+        advanced.push(goal.title);
+      } catch (err) {
+        this.state.failGoal(goal.id, String(err));
+      }
+    }
+
+    return { advanced, stillPlanned };
+  }
+
+  private async goalVerifyTranspilePairs(): Promise<void> {
+    const samples: Record<string, string> = {
+      rust: 'fn main() {\n    let x = 40;\n    println!("{}", x + 2);\n}\n',
+      haskell: 'module Main where\n\nmain :: IO ()\nmain = do\n  putStrLn "verified"\n',
+    };
+
+    for (const pair of this.matrix.structuralPairs()) {
+      const [from, to] = pair.split('->');
+      const sample = samples[from];
+      if (!sample) continue;
+      const result = await this.matrix.transpile(sample, from, to);
+
+      // Execute the produced source when a toolchain is available
+      let ok = result.strategy === 'structural';
+      if (ok) {
+        const tc = this.toolchains.forLanguage(to);
+        if (tc) {
+          await tc.probe();
+          if (tc.info.available) {
+            const run = await tc.run(result.code, {
+              timeoutMs: this.options.timeoutMs,
+            });
+            ok = run.ok;
+          }
+        }
+      }
+      this.state.noteTranspile(pair, result.strategy, ok);
+    }
+  }
+
+  private goalPromotePendingFeedback(): void {
+    // Promote every un-promoted feedback whose value is shared by >= 2 clients
+    const byValue: Record<string, { subject: FeedbackRecord['subject']; value: string; clients: Set<string> }> = {};
+    for (const profile of Object.values(this.state.data.clients)) {
+      for (const fb of profile.feedback) {
+        if (fb.promoted) continue;
+        const key = `${fb.subject}::${fb.value}`;
+        (byValue[key] ||= { subject: fb.subject, value: fb.value, clients: new Set() }).clients.add(profile.id);
+      }
+    }
+    for (const entry of Object.values(byValue)) {
+      if (entry.clients.size >= 2) {
+        this.state.promoteFeedback(entry.subject, entry.value);
+      }
+    }
+  }
+
+  private async goalRunHelloWorlds(): Promise<string> {
+    const samples: Record<string, { source: string; entryFile?: string }> = {
+      go: { source: 'package main\n\nimport "fmt"\n\nfunc main() { fmt.Println("hello") }\n' },
+      java: { source: 'public class Main {\n    public static void main(String[] a) { System.out.println("hello"); }\n}\n' },
+      javascript: { source: 'console.log("hello");\n' },
+      typescript: { source: 'const msg: string = "hello";\nconsole.log(msg);\n' },
+      rust: { source: 'fn main() {\n    println!("hello");\n}\n' },
+      haskell: { source: 'module Main where\n\nmain :: IO ()\nmain = do\n  putStrLn "hello"\n' },
+      python: { source: 'print("hello")\n' },
+    };
+
+    const ran: string[] = [];
+    for (const [language, sample] of Object.entries(samples)) {
+      const report = await this.run(sample.source, { language });
+      if (report.result.ok) ran.push(language);
+    }
+    return `ran: ${ran.join(', ')}`;
+  }
+
+  /** Filter feedback-sourced platforms down to the known PlatformTarget union. */
+  private validatedPlatformOverrides(
+    raw: Record<string, string>
+  ): Record<string, PlatformTarget> {
+    const valid: PlatformTarget[] = [
+      'native', 'jvm', 'node', 'deno', 'browser', 'wasm', 'wasi', 'docker', 'ir',
+    ];
+    const out: Record<string, PlatformTarget> = {};
+    for (const [domain, platform] of Object.entries(raw)) {
+      if (valid.includes(platform as PlatformTarget)) {
+        out[domain] = platform as PlatformTarget;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Keyword definitions from this client's unpromoted keyword-domain
+   * feedback. They steer analysis for this client only until promoted.
+   */
+  private clientKeywordDefinitions(clientId?: string): Record<string, { domain: string; confidence: number }> {
+    if (!clientId) return {};
+    const profile = this.state.data.clients[clientId];
+    if (!profile) return {};
+    const out: Record<string, { domain: string; confidence: number }> = {};
+    for (const fb of profile.feedback) {
+      if (fb.subject === 'keyword-domain' && !fb.promoted) {
+        const [keyword, domain] = fb.value.split('=');
+        if (keyword && domain) out[keyword.trim().toLowerCase()] = { domain: domain.trim(), confidence: 0.6 };
+      }
+    }
+    return out;
+  }
+
+  /** Per-client platform preferences from unpromoted feedback (client-local). */
+  private clientPlatformOverrides(clientId?: string): Record<string, string> {
+    if (!clientId) return {};
+    const profile = this.state.data.clients[clientId];
+    if (!profile) return {};
+    const overrides: Record<string, string> = {};
+    for (const fb of profile.feedback) {
+      if (fb.subject === 'platform-preference' && !fb.promoted) {
+        const [domain, platform] = fb.value.split('=');
+        if (domain && platform) overrides[domain.trim()] = platform.trim();
+      }
+    }
+    return overrides;
   }
 
   // ==========================================================================

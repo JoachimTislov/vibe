@@ -612,6 +612,21 @@ export const LANGUAGE_PATTERNS: LanguagePattern[] = [
     priority: 10,
   },
   {
+    language: 'haskell',
+    patterns: [
+      /module\s+[A-Z]\w*(\.\w+)*\s+where/,
+      /^\w+\s*::/m,
+      /putStrLn/,
+      /main\s*=\s*do/m,
+      /\bdata\s+[A-Z]\w*\s*=/,
+      /<->/,
+      /\breturn\s+\w+\s*$/m,
+      /::\s*IO\s*\(\)/,
+    ],
+    extensions: ['.hs', '.lhs'],
+    priority: 10,
+  },
+  {
     language: 'rust',
     patterns: [
       /fn\s+\w+\s*\(/,

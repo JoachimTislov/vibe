@@ -55,6 +55,31 @@ export function extractJavaClassName(source: string): string {
   return 'Main';
 }
 
+/**
+ * Extract the package declaration (e.g. "com.example.util" from
+ * "package com.example.util;"). javac requires the source file to live at
+ * <dir>/<package path>/<Class>.java — a flat temp dir breaks packaged
+ * classes (found by the real-world prover).
+ */
+export function extractJavaPackage(source: string): string | null {
+  const match = source.match(/^\s*package\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;/m);
+  return match ? match[1] : null;
+}
+
+/** Where the source file must be written so javac accepts the package. */
+export function javaSourcePath(workDir: string, source: string): { filePath: string; fqcn: string } {
+  const pkg = extractJavaPackage(source);
+  const className = extractJavaClassName(source);
+  if (!pkg) {
+    return { filePath: path.join(workDir, `${className}.java`), fqcn: className };
+  }
+  const pkgDir = path.join(workDir, ...pkg.split('.'));
+  return {
+    filePath: path.join(pkgDir, `${className}.java`),
+    fqcn: `${pkg}.${className}`,
+  };
+}
+
 export class JavaToolchain implements Toolchain {
   info: ToolchainInfo = {
     id: 'java',
@@ -86,8 +111,10 @@ export class JavaToolchain implements Toolchain {
 
     const workDir = options.workDir || makeTempDir('java');
     const className = options.moduleName || extractJavaClassName(source);
-    const entryFile = options.entryFile || `${className}.java`;
-    const filePath = writeSourceFile(workDir, entryFile, source);
+    const placement = javaSourcePath(workDir, options.entryFile ? '' : source);
+    const filePath = options.entryFile
+      ? writeSourceFile(workDir, options.entryFile, source)
+      : writeSourceFile(path.dirname(placement.filePath), path.basename(placement.filePath), source);
 
     const args = [
       '-d', workDir,
@@ -102,7 +129,11 @@ export class JavaToolchain implements Toolchain {
       timeoutMs: options.timeoutMs || 120_000,
     });
 
-    const classFile = path.join(workDir, `${className}.class`);
+    const classFile = path.join(
+      workDir,
+      ...((extractJavaPackage(source) || '').split('.').filter(Boolean)),
+      `${className}.class`
+    );
     result.artifacts = fileExists(classFile) ? [classFile] : [];
     return result;
   }
@@ -111,9 +142,10 @@ export class JavaToolchain implements Toolchain {
     if (!this.info.available) return this.unavailable('run');
 
     const workDir = options.workDir || makeTempDir('java');
-    const className = options.moduleName || extractJavaClassName(source);
-    const entryFile = options.entryFile || `${className}.java`;
-    const filePath = writeSourceFile(workDir, entryFile, source);
+    const placement = javaSourcePath(workDir, options.entryFile ? '' : source);
+    const filePath = options.entryFile
+      ? writeSourceFile(workDir, options.entryFile, source)
+      : writeSourceFile(path.dirname(placement.filePath), path.basename(placement.filePath), source);
 
     const javaVersion = this.info.versions['java'] || '';
     const supportsSingleFile = !/version "1[.]/.test(javaVersion); // java 11+
@@ -128,7 +160,7 @@ export class JavaToolchain implements Toolchain {
       });
     }
 
-    // Compile then run
+    // Compile then run (with the fully qualified class name)
     const compileResult = await runCommand('javac', ['-d', workDir, filePath], {
       cwd: workDir,
       env: options.env,
@@ -136,7 +168,7 @@ export class JavaToolchain implements Toolchain {
     });
     if (!compileResult.ok) return compileResult;
 
-    return runCommand('java', ['-cp', workDir, className, ...(options.args || [])], {
+    return runCommand('java', ['-cp', workDir, placement.fqcn, ...(options.args || [])], {
       cwd: workDir,
       env: options.env,
       timeoutMs: options.timeoutMs || 60_000,

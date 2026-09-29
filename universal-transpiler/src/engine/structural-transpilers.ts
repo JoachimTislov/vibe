@@ -78,6 +78,22 @@ function parseRustPrint(line: string): { fmt: string; args: string[] } | null {
   return { fmt: m[1], args };
 }
 
+/** Convert Rust raw string literals (r#"..."# / r"...") to Go strings. */
+function convertRustRawStrings(text: string): string {
+  const escape = (content: string) =>
+    content
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, '\\n')
+      .replace(/\t/g, '\\t');
+
+  // r#"content"# (single-hash form, the common one)
+  let result = text.replace(/r#"([\s\S]*?)"#/g, (_all: string, content: string) => `"${escape(content)}"`);
+  // r"content" (unhashed form; no escapes allowed inside in Rust)
+  result = result.replace(/\br"([^"\n]*)"/g, (_all: string, content: string) => `"${escape(content)}"`);
+  return result;
+}
+
 /** Convert a println!("...{}...", args) to Go. */
 function rustPrintToGo(line: string): string | null {
   const parsed = parseRustPrint(line);
@@ -86,7 +102,10 @@ function rustPrintToGo(line: string): string | null {
   const target = fmt.startsWith('e') ? 'fmt.Fprintln(os.Stderr' : 'fmt.Println(';
   const needsOs = fmt.startsWith('e');
 
-  if (args.length === 0) return null; // not a print macro with args
+  if (args.length === 0) {
+    // println!() with no arguments prints an empty line
+    return needsOs ? `${target})` : 'fmt.Println()';
+  }
   const fmtStr = args[0];
   const rest = args.slice(1);
 
@@ -139,7 +158,7 @@ export function rustToGo(source: string): StructuralTranspileResult {
     (text.match(/{/g) || []).length - (text.match(/}/g) || []).length;
 
   for (const raw of lines) {
-    const line = raw;
+    let line = raw;
     const trimmed = line.trim();
     const indent = /^\s/.test(line) ? (line.match(/^\s*/) || [''])[0] : '';
 
@@ -148,6 +167,9 @@ export function rustToGo(source: string): StructuralTranspileResult {
       out.push(line);
       continue;
     }
+
+    // Raw string literals r#"..."# (and r"...") become escaped Go strings
+    line = convertRustRawStrings(line);
 
     // Attribute macros (#[...]) - emit as comments
     if (trimmed.startsWith('#[')) {
@@ -327,6 +349,16 @@ export function rustToGo(source: string): StructuralTranspileResult {
     header.push('');
   }
 
+  // Leak scan: any Rust-ism that survived conversion is reported, never
+  // silently emitted as if it were valid Go.
+  const rustIsms = /!\(|r#"|\blet\s|\bfn\s|->|&str|\bmut\b|::</;
+  for (const emitted of out) {
+    const m = emitted.match(rustIsms);
+    if (m) {
+      unsupported.push(`unconverted rust syntax "${m[0]}" in: ${emitted.trim().slice(0, 60)}`);
+    }
+  }
+
   return {
     code: [...header, ...out].join('\n'),
     converted: Array.from(new Set(converted)),
@@ -398,14 +430,26 @@ export function haskellToJavaScript(source: string): StructuralTranspileResult {
       // putStrLn "str" -> console.log("str")
       const putStrLn = trimmed.match(/^putStrLn\s+(.+)$/);
       if (putStrLn) {
-        out.push(`  console.log(${haskellExprToJs(putStrLn[1])});`);
-        converted.push('putStrLn');
+        const expr = haskellExprToJs(putStrLn[1]);
+        if (hasResidualHaskellSyntax(expr)) {
+          unsupported.push(`do-line (putStrLn): ${trimmed}`);
+          out.push(`  // [unsupported] ${trimmed}`);
+        } else {
+          out.push(`  console.log(${expr});`);
+          converted.push('putStrLn');
+        }
         continue;
       }
       const putStr = trimmed.match(/^putStr\s+(.+)$/);
       if (putStr) {
-        out.push(`  process.stdout.write(String(${haskellExprToJs(putStr[1])}));`);
-        converted.push('putStr');
+        const expr = haskellExprToJs(putStr[1]);
+        if (hasResidualHaskellSyntax(expr)) {
+          unsupported.push(`do-line (putStr): ${trimmed}`);
+          out.push(`  // [unsupported] ${trimmed}`);
+        } else {
+          out.push(`  process.stdout.write(String(${expr}));`);
+          converted.push('putStr');
+        }
         continue;
       }
 
@@ -427,8 +471,14 @@ export function haskellToJavaScript(source: string): StructuralTranspileResult {
 
       // function call statement
       if (/^[a-z][A-Za-z0-9_']*\s+/.test(trimmed) || /^[a-z][A-Za-z0-9_']*$/.test(trimmed)) {
-        out.push(`  await ${haskellExprToJs(trimmed)};`);
-        converted.push('call-statement');
+        const expr = haskellExprToJs(trimmed);
+        if (hasResidualHaskellSyntax(expr)) {
+          unsupported.push(`do-line: ${trimmed}`);
+          out.push(`  // [unsupported] ${trimmed}`);
+        } else {
+          out.push(`  await ${expr};`);
+          converted.push('call-statement');
+        }
         continue;
       }
 
@@ -481,6 +531,11 @@ export function haskellToJavaScript(source: string): StructuralTranspileResult {
     converted: Array.from(new Set(converted)),
     unsupported: Array.from(new Set(unsupported)),
   };
+}
+
+/** True when the converted expression still contains Haskell-only syntax. */
+function hasResidualHaskellSyntax(expr: string): boolean {
+  return /\$|\bshow\b|::|\s->\s|\|\s*\w+\s*==/.test(expr);
 }
 
 /** Convert a Haskell expression to a JS expression (best-effort subset). */

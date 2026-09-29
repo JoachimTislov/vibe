@@ -170,6 +170,18 @@ export interface DomainAnalysisRequest {
   declaredPlatform?: PlatformTarget;
   /** Language hint; detection used when absent */
   language?: string;
+  /**
+   * Learned keyword definitions (persisted by the engine's state).
+   * Each keyword found in the source adds its domain to the score,
+   * weighted by learned confidence — so newly taught keywords
+   * immediately affect future analysis.
+   */
+  learnedKeywords?: Record<string, { domain: string; confidence: number }>;
+  /**
+   * Upstreamed platform preferences per domain (promoted from client
+   * feedback). Applied when no platform was declared.
+   */
+  platformOverrides?: Record<string, PlatformTarget>;
 }
 
 export interface DomainAnalysisResult {
@@ -206,6 +218,15 @@ export function analyzeDomain(request: DomainAnalysisRequest): DomainAnalysisRes
         matchedKeywords.push(keyword);
       }
     }
+    // Learned (persisted) keyword definitions score alongside builtins
+    if (request.learnedKeywords) {
+      for (const [keyword, def] of Object.entries(request.learnedKeywords)) {
+        if (def.domain === domain.id && normalized.includes(keyword)) {
+          score += Math.max(1, Math.round(def.confidence * 2));
+          matchedKeywords.push(`${keyword} (learned)`);
+        }
+      }
+    }
     if (score > 0) scores.push({ domainId: domain.id, score });
   }
   scores.sort((a, b) => b.score - a.score);
@@ -225,12 +246,15 @@ export function analyzeDomain(request: DomainAnalysisRequest): DomainAnalysisRes
   const frameworkResult = detectFrameworksInSource(source, language);
   const frameworks = frameworkResult.frameworks.map((fw) => fw.id);
 
-  // Platform resolution: declared > framework > domain default > native
+  // Platform resolution: declared > framework > upstream override > domain default > native
   let platform: PlatformTarget;
   if (declaredPlatform && declaredPlatform !== 'auto') {
     platform = declaredPlatform;
   } else if (frameworks.length > 0 && frameworkResult.suggestedPlatform !== 'auto') {
     platform = frameworkResult.suggestedPlatform;
+  } else if (request.platformOverrides && request.platformOverrides[domain.id]) {
+    // Promoted upstream from client feedback: applies to every client
+    platform = request.platformOverrides[domain.id];
   } else if (domain.defaultPlatform) {
     platform = domain.defaultPlatform;
   } else {
