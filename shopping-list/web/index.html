@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#367447">
+  <title>Basket</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <div id="app"><p class="p-8">Loading Basket…</p></div>
+  <script src="/assets/wasm_exec.js"></script>
+  <script>const go = new Go(); WebAssembly.instantiateStreaming(fetch('/assets/app.wasm'), go.importObject).then(x => go.run(x.instance));</script>
+</body>
+</html>

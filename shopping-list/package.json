@@ -1,0 +1,7 @@
+{
+  "name": "basket-ui",
+  "private": true,
+  "scripts": { "css": "tailwindcss -i web/styles/input.css -o web/assets/app.css --minify" },
+  "devDependencies": { "@tailwindcss/cli": "^4.1.13", "tailwindcss": "^4.1.13" }
+}
+

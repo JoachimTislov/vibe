@@ -1,0 +1,46 @@
+plugins {
+    id 'java-library'
+}
+
+micronaut {
+    version = '4.3.3'
+}
+
+group = 'com.girly'
+version = '0.1.0-SNAPSHOT'
+
+description = 'Girly Events Library - Event-driven components and messaging'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+dependencies {
+    // Micronaut
+    implementation "io.micronaut:micronaut-inject:$micronautVersion"
+    implementation "io.micronaut:micronaut-runtime:$micronautVersion"
+    
+    // Messaging (Kafka/RabbitMQ)
+    implementation "io.micronaut.kafka:micronaut-kafka:$kafkaVersion"
+    
+    // Girly libraries
+    implementation project(':lib:girly-common')
+    
+    // Lombok (optional)
+    compileOnly "org.projectlombok:lombok:$lombokVersion"
+    annotationProcessor "org.projectlombok:lombok:$lombokVersion"
+    
+    // Testing
+    testImplementation "org.junit.jupiter:junit-jupiter-api:$junitVersion"
+    testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine:$junitVersion"
+}
+
+test {
+    useJUnitPlatform()
+}

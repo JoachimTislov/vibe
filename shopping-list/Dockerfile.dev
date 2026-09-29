@@ -1,0 +1,4 @@
+FROM golang:1.26-alpine
+RUN apk add --no-cache nodejs npm make protobuf
+WORKDIR /app
+CMD ["sh", "-c", "go mod download && npm install && make web && go run ./cmd/server"]

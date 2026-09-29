@@ -23,9 +23,29 @@ include 'lib:girly-models'
 include 'lib:girly-events'
 include 'lib:girly-tooling'
 
-// Include microservices
+// Include microservices - Phase 1
 include 'services:user-service'
 include 'services:ideas'
+
+// Include microservices - Phase 2: Emotional Support
+include 'services:mood-service'
+include 'services:journal-service'
+include 'services:pet-service'
+
+// Include microservices - Phase 3: Social Connection
+include 'services:social-service'
+include 'services:games-service'
+include 'services:hangout-service'
+
+// Include microservices - Phase 4: Creative Expression
+include 'services:wardrobe-service'
+include 'services:makeup-service'
+include 'services:drama-service'
+
+// Include microservices - Phase 5: Life Management
+include 'services:health-service'
+include 'services:productivity-service'
+include 'services:aggregate-service'
 
 // Configure project directories
 project(':lib:girly-common').projectDir = file('lib/girly-common')
@@ -36,3 +56,23 @@ project(':lib:girly-tooling').projectDir = file('lib/girly-tooling')
 
 project(':services:user-service').projectDir = file('services/user-service')
 project(':services:ideas').projectDir = file('services/ideas')
+
+// Phase 2: Emotional Support
+project(':services:mood-service').projectDir = file('services/mood-service')
+project(':services:journal-service').projectDir = file('services/journal-service')
+project(':services:pet-service').projectDir = file('services/pet-service')
+
+// Phase 3: Social Connection
+project(':services:social-service').projectDir = file('services/social-service')
+project(':services:games-service').projectDir = file('services/games-service')
+project(':services:hangout-service').projectDir = file('services/hangout-service')
+
+// Phase 4: Creative Expression
+project(':services:wardrobe-service').projectDir = file('services/wardrobe-service')
+project(':services:makeup-service').projectDir = file('services/makeup-service')
+project(':services:drama-service').projectDir = file('services/drama-service')
+
+// Phase 5: Life Management
+project(':services:health-service').projectDir = file('services/health-service')
+project(':services:productivity-service').projectDir = file('services/productivity-service')
+project(':services:aggregate-service').projectDir = file('services/aggregate-service')

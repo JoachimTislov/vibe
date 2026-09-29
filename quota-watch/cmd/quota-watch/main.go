@@ -14,6 +14,8 @@ import (
 	"github.com/local/quota-watch/internal/manager"
 	"github.com/local/quota-watch/internal/provider"
 	"github.com/local/quota-watch/internal/providers/demo"
+	"github.com/local/quota-watch/internal/providers/external"
+	"github.com/local/quota-watch/internal/sourceprotocol"
 	"github.com/local/quota-watch/internal/store"
 )
 
@@ -30,6 +32,12 @@ func main() {
 	if cfg.Demo {
 		providers = []provider.Provider{demo.New()}
 		mode = "demo"
+	} else if manifests, loadErr := sourceprotocol.LoadManifests(cfg.SourcesDir); loadErr != nil {
+		logger.Warn("external sources disabled", "error", loadErr)
+	} else {
+		for _, manifest := range manifests {
+			providers = append(providers, external.New(manifest, sourceprotocol.Options{Timeout: cfg.OperationTimeout, MaxFrame: 1 << 20, MaxStderr: 64 << 10}))
+		}
 	}
 	var snapshots store.Store = store.NewMemory(nil)
 	if cfg.CachePath != "" {

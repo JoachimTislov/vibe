@@ -1,0 +1,67 @@
+syntax = "proto3";
+package shopping.v1;
+option go_package = "github.com/example/shopping-list/gen/shopping/v1;shoppingv1";
+
+service ShoppingService {
+  rpc ListLists(ListListsRequest) returns (ListListsResponse);
+  rpc CreateList(CreateListRequest) returns (ShoppingList);
+  rpc UpdateList(UpdateListRequest) returns (ShoppingList);
+  rpc ListItems(ListItemsRequest) returns (ListItemsResponse);
+  rpc AddItem(AddItemRequest) returns (Item);
+  rpc UpdateItem(UpdateItemRequest) returns (Item);
+  rpc SetItemStatus(SetItemStatusRequest) returns (Item);
+  rpc DeleteItem(DeleteItemRequest) returns (Item);
+  rpc CompleteItems(CompleteItemsRequest) returns (CompleteItemsResponse);
+  rpc GetSummary(GetSummaryRequest) returns (Summary);
+  rpc GetSuggestions(GetSuggestionsRequest) returns (GetSuggestionsResponse);
+  rpc SearchDiscounts(SearchDiscountsRequest) returns (SearchDiscountsResponse);
+  rpc ExportData(ExportDataRequest) returns (ExportDataResponse);
+}
+
+enum ItemStatus { ITEM_STATUS_UNSPECIFIED = 0; ITEM_STATUS_ACTIVE = 1; ITEM_STATUS_COMPLETED = 2; ITEM_STATUS_ARCHIVED = 3; }
+enum Priority { PRIORITY_UNSPECIFIED = 0; PRIORITY_LOW = 1; PRIORITY_NORMAL = 2; PRIORITY_HIGH = 3; PRIORITY_URGENT = 4; }
+message Money { int64 minor_units = 1; string currency = 2; }
+
+message ShoppingList {
+  int64 id = 1; string name = 2; string description = 3; string color = 4;
+  bool is_default = 5; bool archived = 6; int64 version = 7;
+  string created_at = 8; string updated_at = 9;
+}
+message Item {
+  int64 id = 1; int64 list_id = 2; string name = 3; double quantity = 4; string unit = 5;
+  string preferred_store = 6; string category = 7; string note = 8; Priority priority = 9;
+  ItemStatus status = 10; Money estimated_unit_price = 11; string barcode = 12; string image_url = 13;
+  int32 position = 14; int64 version = 15; string due_at = 16; string created_at = 17;
+  string updated_at = 18; string completed_at = 19; string archived_at = 20;
+}
+message Suggestion { string name = 1; string preferred_store = 2; double confidence = 3; string reason = 4; }
+message Discount { string product = 1; string store = 2; string price = 3; string source_url = 4; string valid_until = 5; }
+
+message ListListsRequest { bool include_archived = 1; }
+message ListListsResponse { repeated ShoppingList lists = 1; }
+message CreateListRequest { string name = 1; string description = 2; string color = 3; bool make_default = 4; string idempotency_key = 5; }
+message UpdateListRequest { int64 id = 1; string name = 2; string description = 3; string color = 4; bool archived = 5; bool make_default = 6; int64 expected_version = 7; }
+message ListItemsRequest { int64 list_id = 1; repeated ItemStatus statuses = 2; string query = 3; string store = 4; string category = 5; int32 limit = 6; int32 offset = 7; }
+message ListItemsResponse { repeated Item items = 1; int64 total = 2; }
+message AddItemRequest {
+  int64 list_id = 1; string name = 2; double quantity = 3; string unit = 4; string preferred_store = 5;
+  string category = 6; string note = 7; Priority priority = 8; Money estimated_unit_price = 9;
+  string barcode = 10; string image_url = 11; string due_at = 12; bool merge_duplicate = 13; string idempotency_key = 14;
+}
+message UpdateItemRequest {
+  int64 id = 1; string name = 2; double quantity = 3; string unit = 4; string preferred_store = 5;
+  string category = 6; string note = 7; Priority priority = 8; Money estimated_unit_price = 9;
+  string barcode = 10; string image_url = 11; string due_at = 12; int32 position = 13; int64 expected_version = 14;
+}
+message SetItemStatusRequest { int64 id = 1; ItemStatus status = 2; int64 expected_version = 3; Money actual_unit_price = 4; string actual_store = 5; }
+message DeleteItemRequest { int64 id = 1; int64 expected_version = 2; }
+message CompleteItemsRequest { repeated int64 ids = 1; string actual_store = 2; }
+message CompleteItemsResponse { repeated Item items = 1; }
+message GetSummaryRequest { int64 list_id = 1; }
+message Summary { int64 active_count = 1; int64 completed_count = 2; Money estimated_total = 3 [deprecated = true]; repeated string stores = 4; repeated string categories = 5; repeated Money estimated_totals = 6; }
+message GetSuggestionsRequest { int32 limit = 1; int64 list_id = 2; }
+message GetSuggestionsResponse { repeated Suggestion suggestions = 1; }
+message SearchDiscountsRequest { repeated string products = 1; }
+message SearchDiscountsResponse { repeated Discount discounts = 1; }
+message ExportDataRequest {}
+message ExportDataResponse { string media_type = 1; bytes data = 2; string exported_at = 3; }

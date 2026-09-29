@@ -1,0 +1,12 @@
+@import "tailwindcss";
+@source "../../cmd/web/**/*.go";
+
+@theme {
+  --color-leaf-50: #f2f8f1;
+  --color-leaf-600: #367447;
+  --color-ink: #17201a;
+  --color-paper: #fbfaf4;
+}
+
+body { background: var(--color-paper); color: var(--color-ink); }
+

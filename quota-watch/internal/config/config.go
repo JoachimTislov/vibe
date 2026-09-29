@@ -14,6 +14,7 @@ import (
 type Config struct {
 	Listen           string
 	CachePath        string
+	SourcesDir       string
 	Demo             bool
 	RefreshInterval  time.Duration
 	OperationTimeout time.Duration
@@ -25,7 +26,11 @@ func Defaults() Config {
 	if err != nil {
 		cache = os.TempDir()
 	}
-	return Config{Listen: "127.0.0.1:7331", CachePath: filepath.Join(cache, "quota-watch", "snapshot.json"), RefreshInterval: 2 * time.Minute, OperationTimeout: 20 * time.Second, Concurrency: 3}
+	configDir, configErr := os.UserConfigDir()
+	if configErr != nil {
+		configDir = filepath.Join(os.TempDir(), "quota-watch-config")
+	}
+	return Config{Listen: "127.0.0.1:7331", CachePath: filepath.Join(cache, "quota-watch", "snapshot.json"), SourcesDir: filepath.Join(configDir, "quota-watch", "sources.d"), RefreshInterval: 2 * time.Minute, OperationTimeout: 20 * time.Second, Concurrency: 3}
 }
 func Parse(args []string, stderr io.Writer) (Config, error) {
 	c := Defaults()
@@ -33,6 +38,7 @@ func Parse(args []string, stderr io.Writer) (Config, error) {
 	fs.SetOutput(stderr)
 	fs.StringVar(&c.Listen, "listen", c.Listen, "loopback address for the dashboard")
 	fs.StringVar(&c.CachePath, "cache", c.CachePath, "snapshot cache path (empty disables disk cache)")
+	fs.StringVar(&c.SourcesDir, "sources-dir", c.SourcesDir, "trusted external JSON-RPC source manifests")
 	fs.BoolVar(&c.Demo, "demo", false, "use synthetic data without discovery, credentials, or network")
 	fs.DurationVar(&c.RefreshInterval, "refresh-interval", c.RefreshInterval, "background refresh interval")
 	fs.DurationVar(&c.OperationTimeout, "operation-timeout", c.OperationTimeout, "per-provider operation timeout")

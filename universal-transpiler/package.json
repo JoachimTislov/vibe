@@ -1,0 +1,88 @@
+{
+  "name": "universal-transpiler",
+  "version": "1.0.0",
+  "description": "A universal transpiler that can understand and transform any syntax, with dynamic LLM-based code generation",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "universal-transpiler": "./bin/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "clean": "rm -rf dist",
+    "prepublish": "npm run build",
+    "start": "node bin/cli.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "keywords": [
+    "transpiler",
+    "compiler",
+    "interpreter",
+    "llm",
+    "ai",
+    "mistral",
+    "code-generation",
+    "syntax",
+    "parser",
+    "5gl",
+    "fifth-generation-language",
+    "domain-specific",
+    "universal"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@babel/core": "^7.25.0",
+    "@babel/parser": "^7.25.0",
+    "@babel/preset-env": "^7.25.0",
+    "@babel/preset-typescript": "^7.25.0",
+    "acorn": "^8.12.0",
+    "acorn-jsx": "^5.3.2",
+    "espree": "^10.1.0",
+    "typescript": "^5.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/jest": "^29.5.12",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-prettier": "^5.0.0",
+    "jest": "^29.7.0",
+    "prettier": "^3.0.0",
+    "ts-jest": "^29.1.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "peerDependencies": {
+    "@babel/core": "^7.0.0",
+    "typescript": "^4.0.0 || ^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@babel/core": {
+      "optional": true
+    },
+    "typescript": {
+      "optional": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joachim/universal-transpiler"
+  },
+  "bugs": {
+    "url": "https://github.com/joachim/universal-transpiler/issues"
+  },
+  "homepage": "https://github.com/joachim/universal-transpiler#readme"
+}

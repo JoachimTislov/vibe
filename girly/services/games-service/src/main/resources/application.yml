@@ -1,0 +1,135 @@
+micronaut:
+  application:
+    name: games-service
+  server:
+    port: 8080
+    cors:
+      enabled: true
+      configurations:
+        web:
+          allowed-origins:
+            - http://localhost:3000
+            - http://localhost:8080
+            - http://girly.tech
+          allowed-methods:
+            - GET
+            - POST
+            - PUT
+            - DELETE
+            - OPTIONS
+          allowed-headers:
+            - Authorization
+            - Content-Type
+            - X-User-Id
+            - X-Request-Id
+          exposed-headers:
+            - Authorization
+            - X-User-Id
+            - X-Request-Id
+    netty:
+      access-log:
+        enabled: true
+        logger-name: io.micronaut.http.server.access
+        log-format: "%h %l %u %t \"%r\" %s %b \"%{i,X-Request-Id}\""
+  
+  # Security configuration
+  security:
+    enabled: true
+    token:
+      jwt:
+        enabled: true
+        generator:
+          access-token:
+            expiration: 86400
+          refresh-token:
+            expiration: 604800
+        claims:
+          issuer: girly-platform
+          audience: girly-users
+
+  # Database configuration
+  datasources:
+    default:
+      url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/girly}
+      username: ${DATABASE_USER:girly}
+      password: ${DATABASE_PASSWORD:girly2024}
+      driverClassName: org.postgresql.Driver
+      schema: ${DATABASE_SCHEMA:games_svc}
+      hikari:
+        maximum-pool-size: 20
+        minimum-idle: 5
+        idle-timeout: 300000
+        max-lifetime: 1800000
+        connection-timeout: 30000
+
+  # JPA/Hibernate configuration
+  jpa:
+    default:
+      properties:
+        hibernate:
+          hbm2ddl:
+            auto: update
+          show_sql: ${HIBERNATE_SHOW_SQL:false}
+          format_sql: true
+          dialect: org.hibernate.dialect.PostgreSQLDialect
+          default_schema: ${DATABASE_SCHEMA:games_svc}
+
+  # Redis configuration
+  redis:
+    servers:
+      default:
+        host: ${REDIS_HOST:localhost}
+        port: ${REDIS_PORT:6379}
+        timeout: 30s
+    caches:
+      games-cache:
+        server: default
+        expiration: 7d
+
+  # Rate limiting
+  rate-limit:
+    enabled: true
+    default:
+      requests: 100
+      window: 1m
+
+  # Logging configuration
+  logging:
+    level:
+      ROOT: ${LOG_LEVEL:INFO}
+      com.girly: ${LOG_LEVEL:DEBUG}
+      io.micronaut: ${LOG_LEVEL:INFO}
+
+  # Metrics
+  metrics:
+    enabled: true
+    export:
+      prometheus:
+        enabled: true
+        step: PT1M
+
+# Swagger configuration
+swagger:
+  enabled: true
+  api:
+    title: "Girly GAMES-SERVICE API"
+    version: "1.0.0"
+    description: "API for games"
+    termsOfService: "https://girly.tech/terms"
+    license:
+      name: "MIT"
+      url: "https://opensource.org/licenses/MIT"
+    contact:
+      name: "Girly Platform Team"
+      email: "team@girly.tech"
+      url: "https://girly.tech"
+
+# Service-specific configuration
+games-service:
+  user-service-url: ${USER_SERVICE_URL:http://localhost:8001}
+
+# Agent configuration
+games.agent:
+  name: games-agent
+  description: "games agent"
+  environment: ${MICRONAUT_ENVIRONMENTS:development}

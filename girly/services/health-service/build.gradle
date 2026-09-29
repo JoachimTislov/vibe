@@ -1,0 +1,102 @@
+plugins {
+    id 'java'
+    id 'io.micronaut.application' version '4.3.0'
+}
+
+micronaut {
+    version = '4.3.3'
+    processing {
+        incremental = true
+        annotations "com.girly.health.*"
+    }
+    
+    test {
+        resources = true
+    }
+    
+    runtime {
+        microService = true
+    }
+}
+
+group = 'com.girly'
+version = '0.1.0-SNAPSHOT'
+
+description = 'Girly Health Service - Period tracking, wellness monitoring, and health insights'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+dependencies {
+    // Micronaut
+    implementation "io.micronaut:micronaut-inject:$micronautVersion"
+    implementation "io.micronaut:micronaut-runtime:$micronautVersion"
+    implementation "io.micronaut:micronaut-http-server:$micronautVersion"
+    implementation "io.micronaut:micronaut-http-client:$micronautVersion"
+    
+    // Database
+    implementation "io.micronaut.data:micronaut-data-jpa:$micronautVersion"
+    implementation "io.micronaut.data:micronaut-data-hibernate-jpa:$micronautVersion"
+    implementation "org.postgresql:postgresql:$jdbcVersion"
+    implementation "com.zaxxer:HikariCP:$hikariVersion"
+    
+    // Security (HIPAA considerations)
+    implementation "io.micronaut.security:micronaut-security:$micronautVersion"
+    implementation "io.micronaut.security:micronaut-security-jwt:$micronautVersion"
+    implementation "io.micronaut.security:micronaut-security-annotations:$micronautVersion"
+    
+    // Validation
+    implementation "io.micronaut:micronaut-validation:$micronautValidationVersion"
+    implementation "javax.validation:validation-api:$javaxValidationVersion"
+    
+    // JSON
+    implementation "com.fasterxml.jackson.core:jackson-databind:$jacksonVersion"
+    implementation "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.16.1"
+    
+    // Logging
+    implementation "ch.qos.logback:logback-classic:$logbackVersion"
+    
+    // Swagger / OpenAPI
+    implementation "io.micronaut.swagger:micronaut-swagger:$swaggerVersion"
+    implementation "io.micronaut.swagger:micronaut-swagger-swagger-ui:$swaggerVersion"
+    
+    // Redis for caching
+    implementation "io.micronaut.data:micronaut-data-redis:$micronautVersion"
+    
+    // Rate limiting
+    implementation "io.micronaut:micronaut-ratelimit:$micronautVersion"
+    
+    // Scheduling for reminders
+    implementation "io.micronaut:micronaut-scheduling:$micronautVersion"
+    
+    // Girly libraries
+    implementation project(':lib:girly-common')
+    implementation project(':lib:girly-db')
+    implementation project(':lib:girly-models')
+    implementation project(':lib:girly-tooling')
+    
+    // Lombok (optional)
+    compileOnly "org.projectlombok:lombok:$lombokVersion"
+    annotationProcessor "org.projectlombok:lombok:$lombokVersion"
+    
+    // Testing
+    testImplementation "org.junit.jupiter:junit-jupiter-api:$junitVersion"
+    testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine:$junitVersion"
+    testImplementation "org.mockito:mockito-core:5.5.0"
+    testImplementation "org.mockito:mockito-junit-jupiter:5.5.0"
+}
+
+test {
+    useJUnitPlatform()
+}
+
+application {
+    mainClass = 'com.girly.health.Application'
+}

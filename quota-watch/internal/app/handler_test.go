@@ -105,3 +105,19 @@ func TestRPCBodyLimit(t *testing.T) {
 		t.Fatalf("status = %d", w.Code)
 	}
 }
+
+func TestSetupRPCFallbackAndProtection(t *testing.T) {
+	h := NewHandler(&stubService{})
+	w := request(t, h, "POST", "http://localhost/rpc/v1", "localhost", `{"jsonrpc":"2.0","method":"catalog.list","id":1}`, map[string]string{"Content-Type": "application/json"})
+	if !strings.Contains(w.Body.String(), `"version":"2026-09-28.1"`) {
+		t.Fatalf("catalog = %s", w.Body.String())
+	}
+	w = request(t, h, "POST", "http://localhost/rpc/v1", "localhost", `{"jsonrpc":"2.0","method":"integration.plan","params":{"id":"aws"},"id":2}`, map[string]string{"Content-Type": "application/json"})
+	if !strings.Contains(w.Body.String(), `"read_only":true`) {
+		t.Fatalf("plan = %s", w.Body.String())
+	}
+	w = request(t, h, "POST", "http://localhost/rpc/v1", "localhost", `{"jsonrpc":"2.0","method":"integrations.scan","id":3}`, map[string]string{"Content-Type": "application/json"})
+	if !strings.Contains(w.Body.String(), "missing request protection header") {
+		t.Fatalf("scan = %s", w.Body.String())
+	}
+}

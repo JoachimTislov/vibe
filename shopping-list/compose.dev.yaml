@@ -1,0 +1,19 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports: ["8080:8080"]
+    environment:
+      LISTEN_ADDR: 0.0.0.0:8080
+      DATABASE_PATH: /data/shopping.db
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      DISCOUNT_SOURCES: ${DISCOUNT_SOURCES:-}
+    volumes:
+      - .:/app
+      - dev-go:/go/pkg/mod
+      - dev-data:/data
+volumes:
+  dev-go:
+  dev-data:
+

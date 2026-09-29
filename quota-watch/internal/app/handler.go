@@ -40,12 +40,16 @@ func NewHandler(service Service) http.Handler {
 	if service == nil {
 		panic("app: nil Service")
 	}
+	setup, ok := service.(SetupService)
+	if !ok {
+		setup = newLocalSetup()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	mux.HandleFunc("POST /rpc/v1", rpcHandler(service))
+	mux.HandleFunc("POST /rpc/v1", rpcHandler(service, setup))
 	assets, err := fs.Sub(webFiles, "web")
 	if err != nil {
 		panic(err)
@@ -90,7 +94,7 @@ func sameOrigin(r *http.Request) bool {
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && strings.EqualFold(u.Host, r.Host)
 }
 
-func rpcHandler(service Service) http.HandlerFunc {
+func rpcHandler(service Service, setup SetupService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
 			writeRPCError(w, http.StatusUnsupportedMediaType, -32600, "content type must be application/json", nil)
@@ -107,7 +111,7 @@ func rpcHandler(service Service) http.HandlerFunc {
 			return
 		}
 		if body[0] == '[' {
-			handleBatch(w, r, service, body)
+			handleBatch(w, r, service, setup, body)
 			return
 		}
 		var req rpcRequest
@@ -115,7 +119,7 @@ func rpcHandler(service Service) http.HandlerFunc {
 			writeRPCError(w, http.StatusBadRequest, -32700, "parse error", nil)
 			return
 		}
-		resp, notify := dispatch(r, service, req)
+		resp, notify := dispatch(r, service, setup, req)
 		if notify {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -123,7 +127,7 @@ func rpcHandler(service Service) http.HandlerFunc {
 		writeRPC(w, http.StatusOK, resp)
 	}
 }
-func handleBatch(w http.ResponseWriter, r *http.Request, service Service, body []byte) {
+func handleBatch(w http.ResponseWriter, r *http.Request, service Service, setup SetupService, body []byte) {
 	var raws []json.RawMessage
 	if json.Unmarshal(body, &raws) != nil {
 		writeRPCError(w, http.StatusBadRequest, -32700, "parse error", nil)
@@ -140,7 +144,7 @@ func handleBatch(w http.ResponseWriter, r *http.Request, service Service, body [
 			responses = append(responses, rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: -32600, Message: "invalid request"}, ID: json.RawMessage("null")})
 			continue
 		}
-		resp, notify := dispatch(r, service, req)
+		resp, notify := dispatch(r, service, setup, req)
 		if !notify {
 			responses = append(responses, resp)
 		}
@@ -162,7 +166,7 @@ func decodeOne(body []byte, dst *rpcRequest) error {
 	}
 	return nil
 }
-func dispatch(r *http.Request, service Service, req rpcRequest) (rpcResponse, bool) {
+func dispatch(r *http.Request, service Service, setup SetupService, req rpcRequest) (rpcResponse, bool) {
 	notify := len(req.ID) == 0
 	resp := rpcResponse{JSONRPC: "2.0", ID: req.ID}
 	if notify {
@@ -172,7 +176,7 @@ func dispatch(r *http.Request, service Service, req rpcRequest) (rpcResponse, bo
 		resp.Error = &rpcError{Code: -32600, Message: "invalid request"}
 		return resp, notify
 	}
-	if len(req.Params) > 0 && string(req.Params) != "null" && string(req.Params) != "{}" && string(req.Params) != "[]" {
+	if req.Method != "integration.plan" && len(req.Params) > 0 && string(req.Params) != "null" && string(req.Params) != "{}" && string(req.Params) != "[]" {
 		resp.Error = &rpcError{Code: -32602, Message: "this method takes no parameters"}
 		return resp, notify
 	}
@@ -194,6 +198,45 @@ func dispatch(r *http.Request, service Service, req rpcRequest) (rpcResponse, bo
 			resp.Error = &rpcError{Code: -32000, Message: "refresh unavailable"}
 		} else {
 			resp.Result = state
+		}
+	case "catalog.list":
+		v, err := setup.Catalog(r.Context())
+		if err != nil {
+			resp.Error = &rpcError{Code: -32000, Message: "catalogue unavailable"}
+		} else {
+			resp.Result = v
+		}
+	case "integrations.list":
+		v, err := setup.Integrations(r.Context())
+		if err != nil {
+			resp.Error = &rpcError{Code: -32000, Message: "integrations unavailable"}
+		} else {
+			resp.Result = v
+		}
+	case "integrations.scan":
+		if r.Header.Get("X-Quota-Watch-RPC") != "1" {
+			resp.Error = &rpcError{Code: -32001, Message: "missing request protection header"}
+			break
+		}
+		v, err := setup.ScanIntegrations(r.Context())
+		if err != nil {
+			resp.Error = &rpcError{Code: -32000, Message: "scan unavailable"}
+		} else {
+			resp.Result = v
+		}
+	case "integration.plan":
+		var p struct {
+			ID string `json:"id"`
+		}
+		if len(req.Params) == 0 || json.Unmarshal(req.Params, &p) != nil || p.ID == "" {
+			resp.Error = &rpcError{Code: -32602, Message: "id is required"}
+			break
+		}
+		v, err := setup.IntegrationPlan(r.Context(), p.ID)
+		if err != nil {
+			resp.Error = &rpcError{Code: -32602, Message: "unknown integration"}
+		} else {
+			resp.Result = v
 		}
 	default:
 		resp.Error = &rpcError{Code: -32601, Message: "method not found"}
