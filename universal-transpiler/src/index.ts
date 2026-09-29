@@ -87,6 +87,7 @@ export * from './parsers/language-parsers';
 
 export * from './toolchains/types';
 export * from './toolchains/exec';
+export * from './toolchains/docker';
 export * from './toolchains/registry';
 export {
   RustToolchain,
@@ -130,6 +131,7 @@ export * from './frameworks/framework-registry';
 // ============================================================================
 
 export * from './domains/domain-analyzer';
+export * from './domains/foodsavr';
 
 // ============================================================================
 // Engine Exports (the universal wrapper facade)

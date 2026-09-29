@@ -156,6 +156,22 @@ export const DOMAIN_CATALOG: DomainSpec[] = [
     defaultOutputMode: 'run',
     description: 'General purpose scripts',
   },
+  {
+    id: 'food-tracking',
+    name: 'Food Tracking / Shopping Lists (foodSavr)',
+    keywords: [
+      'food', 'pantry', 'fridge', 'freezer', 'grocery', 'groceries',
+      'shopping list', 'shoppinglist', 'expiration', 'expirationdate',
+      'expiry', 'expiring', 'expired', 'spoil', 'foodwaste', 'mealplan',
+      'recipe', 'consumptionrate', 'openfoodfacts', 'foodsavr',
+    ],
+    defaultPlatform: 'native',
+    defaultOutputMode: 'run',
+    description:
+      'Food inventory tracking synchronized with meal planning and ' +
+      'consumption rates, producing shopping lists and waste alerts ' +
+      '(modeled on github.com/JoachimTislov/foodsavr)',
+  },
 ];
 
 // ============================================================================

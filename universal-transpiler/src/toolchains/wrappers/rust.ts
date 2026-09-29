@@ -29,6 +29,7 @@ import {
   whichSync,
   writeSourceFile,
 } from '../exec';
+import { ensureToolchainExecution, runInDocker, TOOLCHAIN_IMAGES } from '../docker';
 
 const RUST_FRAMEWORK_HINTS: Record<string, string> = {
   'actix-web': 'actix',
@@ -47,6 +48,9 @@ const RUST_FRAMEWORK_HINTS: Record<string, string> = {
 };
 
 export class RustToolchain implements Toolchain {
+  /** rustc found on the host PATH (false when running via docker) */
+  private nativeAvailable = false;
+
   info: ToolchainInfo = {
     id: 'rust',
     name: 'Rust (rustc/cargo)',
@@ -70,17 +74,46 @@ export class RustToolchain implements Toolchain {
       }
     }
 
+    this.nativeAvailable = rustcPath !== null;
+
+    // Docker fallback: when rustc is missing on the host, a container
+    // image can provide it.
+    if (!this.nativeAvailable) {
+      const resolved = await ensureToolchainExecution('rust', false);
+      if (resolved.mode === 'docker' && resolved.image) {
+        versions['docker-fallback'] = resolved.image;
+      }
+    }
+
     this.info.versions = versions;
-    this.info.available = rustcPath !== null;
+    this.info.available = this.nativeAvailable || !!versions['docker-fallback'];
     return this.info;
   }
 
   async compile(source: string, options: CompileOptions = {}): Promise<ExecResult> {
-    if (!this.info.available) {
-      return this.unavailable('compile', options);
+    const workDir = options.workDir || makeTempDir('rust');
+
+    // Docker fallback: compile inside the rust image. The container sees the
+    // work directory mounted at /work, so all paths in the command are
+    // /work-relative; artifacts are reported with their host paths.
+    if (!this.nativeAvailable) {
+      if (!this.info.available) return this.unavailable('compile', options);
+      const entryFile = options.entryFile || 'main.rs';
+      writeSourceFile(workDir, entryFile, source);
+      const platform = options.platform || 'native';
+      const target = platform === 'wasm' ? 'wasm32-unknown-unknown' : platform === 'wasi' ? 'wasm32-wasi' : null;
+      const outName = 'program';
+      const compileCmd = `rustc ${entryFile} -o ${outName} ${target ? `--target ${target}` : ''} ${options.release ? '-O' : ''}`.replace(/\s+/g, ' ');
+      const result = await runInDocker(
+        this.info.versions['docker-fallback'],
+        ['bash', '-c', compileCmd],
+        { workDir, timeoutMs: options.timeoutMs || 180_000, env: options.env }
+      );
+      const hostArtifact = path.join(workDir, outName);
+      result.artifacts = fileExists(hostArtifact) ? [hostArtifact] : [];
+      return result;
     }
 
-    const workDir = options.workDir || makeTempDir('rust');
     const entryFile = options.entryFile || 'main.rs';
     const filePath = writeSourceFile(workDir, entryFile, source);
     const outPath = options.outputPath || path.join(workDir, 'program');
@@ -111,11 +144,21 @@ export class RustToolchain implements Toolchain {
   }
 
   async run(source: string, options: RunOptions = {}): Promise<ExecResult> {
-    if (!this.info.available) {
-      return this.unavailable('run', options);
+    const workDir = options.workDir || makeTempDir('rust');
+
+    // Docker fallback: compile and execute inside the rust image
+    if (!this.nativeAvailable) {
+      if (!this.info.available) return this.unavailable('run', options);
+      const entryFile = options.entryFile || 'main.rs';
+      writeSourceFile(workDir, entryFile, source);
+      const cmd = `rustc ${entryFile} -o program && ./program ${(options.args || []).join(' ')}`.trim();
+      return runInDocker(
+        this.info.versions['docker-fallback'],
+        ['bash', '-c', cmd],
+        { workDir, timeoutMs: options.timeoutMs || 180_000, env: options.env, stdin: options.stdin }
+      );
     }
 
-    const workDir = options.workDir || makeTempDir('rust');
     const filePath = writeSourceFile(workDir, options.entryFile || 'main.rs', source);
     const binPath = path.join(workDir, 'program');
 
@@ -220,13 +263,14 @@ export class RustToolchain implements Toolchain {
   }
 
   private unavailable(operation: string, _options: ToolchainContextOptions = {}): ExecResult {
+    const image = TOOLCHAIN_IMAGES['rust'];
     return {
       ok: false,
       stdout: '',
       stderr:
-        `rustc not found on PATH; cannot ${operation} Rust natively. ` +
-        `Falling back to transpilation is required. ` +
-        `Install rust via https://rustup.rs to enable native execution.`,
+        `rustc not found on PATH and docker fallback unavailable (image ${image} not pullable); ` +
+        `cannot ${operation} Rust. Install rust via https://rustup.rs, start docker, or rely ` +
+        `on structural transpilation.`,
       exitCode: null,
       durationMs: 0,
       command: `rustc ${operation}`,

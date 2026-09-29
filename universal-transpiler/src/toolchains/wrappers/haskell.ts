@@ -29,6 +29,7 @@ import {
   whichSync,
   writeSourceFile,
 } from '../exec';
+import { ensureToolchainExecution, runInDocker, TOOLCHAIN_IMAGES } from '../docker';
 
 const HASKELL_FRAMEWORK_HINTS: Record<string, string> = {
   'yesod': 'yesod',
@@ -55,6 +56,9 @@ export function extractHaskellModuleName(source: string): string {
 }
 
 export class HaskellToolchain implements Toolchain {
+  /** ghc found on the host PATH (false when running via docker) */
+  private nativeAvailable = false;
+
   info: ToolchainInfo = {
     id: 'haskell',
     name: 'Haskell (ghc/runghc/stack)',
@@ -75,15 +79,43 @@ export class HaskellToolchain implements Toolchain {
         if (bin === 'ghc') found = true;
       }
     }
+    this.nativeAvailable = found;
+
+    // Docker fallback: when ghc is missing on the host, a container
+    // image can provide it.
+    if (!this.nativeAvailable) {
+      const resolved = await ensureToolchainExecution('haskell', false);
+      if (resolved.mode === 'docker' && resolved.image) {
+        versions['docker-fallback'] = resolved.image;
+      }
+    }
+
     this.info.versions = versions;
-    this.info.available = found;
+    this.info.available = this.nativeAvailable || !!versions['docker-fallback'];
     return this.info;
   }
 
   async compile(source: string, options: CompileOptions = {}): Promise<ExecResult> {
+    const workDir = options.workDir || makeTempDir('haskell');
+
+    // Docker fallback: compile inside the haskell image
+    if (!this.nativeAvailable) {
+      if (!this.info.available) return this.unavailable('compile');
+      const entryFile = options.entryFile || 'Main.hs';
+      writeSourceFile(workDir, entryFile, source);
+      const outPath = options.outputPath || path.join(workDir, 'program');
+      const cmd = `ghc -o ${outPath} ${options.release ? '-O2' : ''} ${entryFile}`.replace(/\s+/g, ' ');
+      const result = await runInDocker(
+        this.info.versions['docker-fallback'],
+        ['bash', '-c', cmd],
+        { workDir, timeoutMs: options.timeoutMs || 300_000, env: options.env }
+      );
+      result.artifacts = fileExists(outPath) ? [outPath] : [];
+      return result;
+    }
+
     if (!this.info.available) return this.unavailable('compile');
 
-    const workDir = options.workDir || makeTempDir('haskell');
     const entryFile = options.entryFile || 'Main.hs';
     const filePath = writeSourceFile(workDir, entryFile, source);
     const outPath = options.outputPath || path.join(workDir, 'program');
@@ -105,11 +137,22 @@ export class HaskellToolchain implements Toolchain {
   }
 
   async run(source: string, options: RunOptions = {}): Promise<ExecResult> {
-    if (!this.info.available) return this.unavailable('run');
-
     const workDir = options.workDir || makeTempDir('haskell');
     const entryFile = options.entryFile || 'Main.hs';
     const filePath = writeSourceFile(workDir, entryFile, source);
+
+    // Docker fallback: interpret inside the haskell image
+    if (!this.nativeAvailable) {
+      if (!this.info.available) return this.unavailable('run');
+      return runInDocker(
+        this.info.versions['docker-fallback'],
+        ['runghc', entryFile, ...(options.args || [])],
+        { workDir, timeoutMs: options.timeoutMs || 300_000, env: options.env, stdin: options.stdin }
+      );
+    }
+
+    if (!this.info.available) return this.unavailable('run');
+
 
     // Prefer runghc for fast interpretation
     if (whichSync('runghc')) {
@@ -216,13 +259,14 @@ export class HaskellToolchain implements Toolchain {
   }
 
   private unavailable(operation: string): ExecResult {
+    const image = TOOLCHAIN_IMAGES['haskell'];
     return {
       ok: false,
       stdout: '',
       stderr:
-        `ghc/runghc not found on PATH; cannot ${operation} Haskell natively. ` +
-        `Install ghcup (https://www.haskell.org/ghcup/) to enable native execution. ` +
-        `The engine will fall back to transpilation.`,
+        `ghc/runghc not found on PATH and docker fallback unavailable (image ${image} not pullable); ` +
+        `cannot ${operation} Haskell. Install ghcup (https://www.haskell.org/ghcup/), start ` +
+        `docker, or rely on structural transpilation.`,
       exitCode: null,
       durationMs: 0,
       command: `ghc ${operation}`,
