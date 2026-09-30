@@ -11,6 +11,7 @@
  */
 
 import type { SystemSpec, SystemRecord } from './system-dsl';
+import { FoodTrackingWorkflow } from './foodsavr';
 
 export type SystemTarget = 'javascript' | 'go' | 'python';
 
@@ -84,6 +85,8 @@ export function generateSystemCode(spec: SystemSpec, target: SystemTarget): stri
       return testingCode(spec, target);
     case 'wasm':
       return wasmCode(spec, target);
+    case 'food-tracking':
+      return foodTrackingCode(spec, target);
     default:
       return undefined;
   }
@@ -113,24 +116,7 @@ function webBackendCode(spec: SystemSpec, target: SystemTarget): string | undefi
         ``,
       ];
 
-      if (resources.length > 0) {
-        out.push(
-          `// In-memory stores for the declared resources (keyed by id)`,
-          `const stores = {`,
-          ...spec.records
-            .filter((r) => resources.some((res) => res.record === r.name))
-            .map((r) => `  ${r.name}: new Map(),`),
-          `};`,
-          `let nextId = 1;`,
-          ``,
-          `async function readBody(req) {`,
-          `  const chunks = [];`,
-          `  for await (const chunk of req) chunks.push(chunk);`,
-          `  return Buffer.concat(chunks).toString('utf8') || '{}';`,
-          `}`,
-          ``
-        );
-      }
+      out.push(...jsStorePrelude(spec, resources));
 
       out.push(
         `function json(res, body, status = 200) {`,
@@ -155,61 +141,11 @@ function webBackendCode(spec: SystemSpec, target: SystemTarget): string | undefi
 
       for (const resource of resources) {
         const record = spec.records.find((rec) => rec.name === resource.record)!;
-        const base = resourcePath(record);
-        const store = `stores.${record.name}`;
-        const sample = `${record.name}Sample`;
-        out.push(
-          `  { method: 'GET', path: ${JSON.stringify(base)}, respond: async (req, res) => json(res, [...${store}.values()]) },`,
-          `  { method: 'POST', path: ${JSON.stringify(base)}, respond: async (req, res) => {`,
-          `      const item = { ...${sample}, ...JSON.parse(await readBody(req)) };`,
-          `      item.id = nextId++;`,
-          `      ${store}.set(item.id, item);`,
-          `      json(res, item, 201);`,
-          `  } },`,
-          `  { method: 'GET', path: ${JSON.stringify(`${base}/:id`)}, respond: async (req, res, params) => {`,
-          `      const item = ${store}.get(Number(params.id));`,
-          `      if (!item) { res.writeHead(404).end(); return; }`,
-          `      json(res, item);`,
-          `  } },`,
-          `  { method: 'PUT', path: ${JSON.stringify(`${base}/:id`)}, respond: async (req, res, params) => {`,
-          `      const id = Number(params.id);`,
-          `      const item = { ...${sample}, ...JSON.parse(await readBody(req)), id };`,
-          `      ${store}.set(id, item);`,
-          `      json(res, item);`,
-          `  } },`,
-          `  { method: 'DELETE', path: ${JSON.stringify(`${base}/:id`)}, respond: async (req, res, params) => {`,
-          `      ${store}.delete(Number(params.id));`,
-          `      json(res, { deleted: true });`,
-          `  } },`
-        );
+        out.push(...jsResourceRoutes(record));
       }
 
-      out.push(
-        `];`,
-        ``,
-        `const server = http.createServer(async (req, res) => {`,
-        `  const parts = (req.url || '/').split('?')[0].split('/').filter(Boolean);`,
-        `  for (const route of routes) {`,
-        `    if (route.method !== req.method) continue;`,
-        `    const rp = route.path.split('/').filter(Boolean);`,
-        `    if (rp.length !== parts.length) continue;`,
-        `    const params = {};`,
-        `    let match = true;`,
-        `    for (let i = 0; i < rp.length; i++) {`,
-        `      if (rp[i].startsWith(':')) params[rp[i].slice(1)] = parts[i];`,
-        `      else if (rp[i] !== parts[i]) { match = false; break; }`,
-        `    }`,
-        `    if (match) return route.respond(req, res, params);`,
-        `  }`,
-        `  res.writeHead(404, { 'content-type': 'text/plain' });`,
-        `  res.end('not found');`,
-        `});`,
-        ``,
-        `server.listen(${port}, () => {`,
-        `  console.log('${spec.title} listening on http://localhost:${port}');`,
-        `});`,
-        ``
-      );
+      out.push('];', '');
+      out.push(...jsRouterTail(spec.title, port));
       return out.join('\n');
     }
 
@@ -242,11 +178,7 @@ function webBackendCode(spec: SystemSpec, target: SystemTarget): string | undefi
         resources.some((res) => res.record === r.name)
       );
       for (const record of resourceRecords) {
-        out.push(
-          `var ${lowerCamel(record.name)}Store = map[int]${upperCamel(record.name)}{}`,
-          `var ${lowerCamel(record.name)}NextID = 1`,
-          ``
-        );
+        out.push(...goStorePrelude(record));
       }
 
       out.push(`func main() {`);
@@ -271,61 +203,7 @@ function webBackendCode(spec: SystemSpec, target: SystemTarget): string | undefi
       }
 
       for (const record of resourceRecords) {
-        const base = resourcePath(record);
-        const store = `${lowerCamel(record.name)}Store`;
-        const next = `${lowerCamel(record.name)}NextID`;
-        const type = upperCamel(record.name);
-        const idField = upperCamel(record.fields.find((f) => f.toLowerCase() === 'id') ?? 'id');
-        out.push(
-          `\thttp.HandleFunc("${base}", func(w http.ResponseWriter, req *http.Request) {`,
-          `\t\tswitch req.Method {`,
-          `\t\tcase "GET":`,
-          `\t\t	list := make([]${type}, 0, len(${store}))`,
-          `\t\t\tfor _, v := range ${store} {`,
-          `\t\t\t\tlist = append(list, v)`,
-          `\t\t\t}`,
-          `\t\t\twriteJSON(w, list)`,
-          `\t\tcase "POST":`,
-          `\t\t\tvar item ${type}`,
-          `\t\t\tbody, _ := io.ReadAll(req.Body)`,
-          `\t\t\tjson.Unmarshal(body, &item)`,
-          `\t\t\titem.${idField} = ${next}`,
-          `\t\t\t${next}++`,
-          `\t\t\t${store}[item.${idField}] = item`,
-          `\t\t\twriteJSON(w, item)`,
-          `\t\tdefault:`,
-          `\t\t\tw.WriteHeader(http.StatusMethodNotAllowed)`,
-          `\t\t}`,
-          `\t})`,
-          `\thttp.HandleFunc("${base}/", func(w http.ResponseWriter, req *http.Request) {`,
-          `\t\tid, err := strconv.Atoi(strings.TrimPrefix(req.URL.Path, "${base}/"))`,
-          `\t\tif err != nil {`,
-          `\t\t\tw.WriteHeader(http.StatusBadRequest)`,
-          `\t\t\treturn`,
-          `\t\t}`,
-          `\t\tswitch req.Method {`,
-          `\t\tcase "GET":`,
-          `\t\t\titem, ok := ${store}[id]`,
-          `\t\t\tif !ok {`,
-          `\t\t\t\tw.WriteHeader(http.StatusNotFound)`,
-          `\t\t\t\treturn`,
-          `\t\t\t}`,
-          `\t\t\twriteJSON(w, item)`,
-          `\t\tcase "PUT":`,
-          `\t\t\tvar item ${type}`,
-          `\t\t\tbody, _ := io.ReadAll(req.Body)`,
-          `\t\t\tjson.Unmarshal(body, &item)`,
-          `\t\t\titem.${idField} = id`,
-          `\t\t\t${store}[id] = item`,
-          `\t\t\twriteJSON(w, item)`,
-          `\t\tcase "DELETE":`,
-          `\t\t\tdelete(${store}, id)`,
-          `\t\t\twriteJSON(w, map[string]bool{"deleted": true})`,
-          `\t\tdefault:`,
-          `\t\t\tw.WriteHeader(http.StatusMethodNotAllowed)`,
-          `\t\t}`,
-          `\t})`
-        );
+        out.push(...goResourceHandlers(record));
       }
 
       out.push(
@@ -659,4 +537,280 @@ function wasmCode(spec: SystemSpec, target: SystemTarget): string | undefined {
     `})();`,
     ``,
   ].join('\n');
+}
+
+// ============================================================================
+// Shared resource fragments (web-backend and food-tracking)
+// ============================================================================
+
+function jsStorePrelude(spec: SystemSpec, resources: { record: string }[]): string[] {
+  if (resources.length === 0) return [];
+  return [
+    `// In-memory stores for the declared resources (keyed by id)`,
+    `const stores = {`,
+    ...spec.records
+      .filter((r) => resources.some((res) => res.record === r.name))
+      .map((r) => `  ${r.name}: new Map(),`),
+    `};`,
+    `let nextId = 1;`,
+    ``,
+    `async function readBody(req) {`,
+    `  const chunks = [];`,
+    `  for await (const chunk of req) chunks.push(chunk);`,
+    `  return Buffer.concat(chunks).toString('utf8') || '{}';`,
+    `}`,
+    ``,
+  ];
+}
+
+function jsResourceRoutes(record: SystemRecord): string[] {
+  const base = resourcePath(record);
+  const store = `stores.${record.name}`;
+  const sample = `${record.name}Sample`;
+  return [
+    `  { method: 'GET', path: ${JSON.stringify(base)}, respond: async (req, res) => json(res, [...${store}.values()]) },`,
+    `  { method: 'POST', path: ${JSON.stringify(base)}, respond: async (req, res) => {`,
+    `      const item = { ...${sample}, ...JSON.parse(await readBody(req)) };`,
+    `      item.id = nextId++;`,
+    `      ${store}.set(item.id, item);`,
+    `      json(res, item, 201);`,
+    `  } },`,
+    `  { method: 'GET', path: ${JSON.stringify(`${base}/:id`)}, respond: async (req, res, params) => {`,
+    `      const item = ${store}.get(Number(params.id));`,
+    `      if (!item) { res.writeHead(404).end(); return; }`,
+    `      json(res, item);`,
+    `  } },`,
+    `  { method: 'PUT', path: ${JSON.stringify(`${base}/:id`)}, respond: async (req, res, params) => {`,
+    `      const id = Number(params.id);`,
+    `      const item = { ...${sample}, ...JSON.parse(await readBody(req)), id };`,
+    `      ${store}.set(id, item);`,
+    `      json(res, item);`,
+    `  } },`,
+    `  { method: 'DELETE', path: ${JSON.stringify(`${base}/:id`)}, respond: async (req, res, params) => {`,
+    `      ${store}.delete(Number(params.id));`,
+    `      json(res, { deleted: true });`,
+    `  } },`,
+  ];
+}
+
+function jsRouterTail(title: string, port: number): string[] {
+  return [
+    `const server = http.createServer(async (req, res) => {`,
+    `  const parts = (req.url || '/').split('?')[0].split('/').filter(Boolean);`,
+    `  for (const route of routes) {`,
+    `    if (route.method !== req.method) continue;`,
+    `    const rp = route.path.split('/').filter(Boolean);`,
+    `    if (rp.length !== parts.length) continue;`,
+    `    const params = {};`,
+    `    let match = true;`,
+    `    for (let i = 0; i < rp.length; i++) {`,
+    `      if (rp[i].startsWith(':')) params[rp[i].slice(1)] = parts[i];`,
+    `      else if (rp[i] !== parts[i]) { match = false; break; }`,
+    `    }`,
+    `    if (match) return route.respond(req, res, params);`,
+    `  }`,
+    `  res.writeHead(404, { 'content-type': 'text/plain' });`,
+    `  res.end('not found');`,
+    `});`,
+    ``,
+    `server.listen(${port}, () => {`,
+    `  console.log('${title} listening on http://localhost:${port}');`,
+    `});`,
+    ``,
+  ];
+}
+
+function goStorePrelude(record: SystemRecord): string[] {
+  return [
+    `var ${lowerCamel(record.name)}Store = map[int]${upperCamel(record.name)}{}`,
+    `var ${lowerCamel(record.name)}NextID = 1`,
+    ``,
+  ];
+}
+
+function goResourceHandlers(record: SystemRecord): string[] {
+  const base = resourcePath(record);
+  const store = `${lowerCamel(record.name)}Store`;
+  const next = `${lowerCamel(record.name)}NextID`;
+  const type = upperCamel(record.name);
+  const idField = upperCamel(record.fields.find((f) => f.toLowerCase() === 'id') ?? 'id');
+  return [
+    `\thttp.HandleFunc("${base}", func(w http.ResponseWriter, req *http.Request) {`,
+    `\t\tswitch req.Method {`,
+    `\t\tcase "GET":`,
+    `\t\t\tlist := make([]${type}, 0, len(${store}))`,
+    `\t\t\tfor _, v := range ${store} {`,
+    `\t\t\t\tlist = append(list, v)`,
+    `\t\t\t}`,
+    `\t\t\twriteJSON(w, list)`,
+    `\t\tcase "POST":`,
+    `\t\t\tvar item ${type}`,
+    `\t\t\tbody, _ := io.ReadAll(req.Body)`,
+    `\t\t\tjson.Unmarshal(body, &item)`,
+    `\t\t\titem.${idField} = ${next}`,
+    `\t\t\t${next}++`,
+    `\t\t\t${store}[item.${idField}] = item`,
+    `\t\t\twriteJSON(w, item)`,
+    `\t\tdefault:`,
+    `\t\t\tw.WriteHeader(http.StatusMethodNotAllowed)`,
+    `\t\t}`,
+    `\t})`,
+    `\thttp.HandleFunc("${base}/", func(w http.ResponseWriter, req *http.Request) {`,
+    `\t\tid, err := strconv.Atoi(strings.TrimPrefix(req.URL.Path, "${base}/"))`,
+    `\t\tif err != nil {`,
+    `\t\t\tw.WriteHeader(http.StatusBadRequest)`,
+    `\t\t\treturn`,
+    `\t\t}`,
+    `\t\tswitch req.Method {`,
+    `\t\tcase "GET":`,
+    `\t\t\titem, ok := ${store}[id]`,
+    `\t\t\tif !ok {`,
+    `\t\t\t\tw.WriteHeader(http.StatusNotFound)`,
+    `\t\t\t\treturn`,
+    `\t\t\t}`,
+    `\t\t\twriteJSON(w, item)`,
+    `\t\tcase "PUT":`,
+    `\t\t\tvar item ${type}`,
+    `\t\t\tbody, _ := io.ReadAll(req.Body)`,
+    `\t\t\tjson.Unmarshal(body, &item)`,
+    `\t\t\titem.${idField} = id`,
+    `\t\t\t${store}[id] = item`,
+    `\t\t\twriteJSON(w, item)`,
+    `\t\tcase "DELETE":`,
+    `\t\t\tdelete(${store}, id)`,
+    `\t\t\twriteJSON(w, map[string]bool{"deleted": true})`,
+    `\t\tdefault:`,
+    `\t\t\tw.WriteHeader(http.StatusMethodNotAllowed)`,
+    `\t\t}`,
+    `\t})`,
+  ];
+}
+
+function goRecordDeclarations(spec: SystemSpec): string[] {
+  return spec.records.flatMap((r) => [
+    `type ${upperCamel(r.name)} struct {`,
+    ...r.fields.map((f) => `\t${upperCamel(f)} ${goType(f)} \`json:"${f}"\``),
+    `}`,
+    ``,
+  ]);
+}
+
+// ============================================================================
+// food-tracking: the 5GL bridge — a system declaration carrying an
+// embedded workflow, served over HTTP
+// ============================================================================
+
+function foodTrackingCode(spec: SystemSpec, target: SystemTarget): string | undefined {
+  const shoppingLists = spec.modules.flatMap((m) => m.shoppingLists);
+  const resources = spec.modules.flatMap((m) => m.resources);
+  if (shoppingLists.length === 0 && resources.length === 0) return undefined;
+  const port = 8080;
+  const workflowResult = spec.workflow
+    ? new FoodTrackingWorkflow(spec.workflow.spec).run()
+    : undefined;
+
+  switch (target) {
+    case 'javascript': {
+      const out: string[] = [
+        `// ${spec.title}: food-tracking from the system declaration (node)`,
+        `const http = require('http');`,
+        ``,
+        `// Declared records: sample instances (the store layer starts here)`,
+        ...spec.records.map(
+          (r) => `const ${r.name}Sample = ${JSON.stringify(sampleObject(r))};`
+        ),
+        ``,
+      ];
+      if (workflowResult) {
+        out.push(
+          `// The embedded workflow's result, computed deterministically`,
+          `const shoppingResult = ${JSON.stringify(workflowResult)};`,
+          ``
+        );
+      }
+      out.push(...jsStorePrelude(spec, resources));
+      out.push(
+        `function json(res, body, status = 200) {`,
+        `  res.writeHead(status, { 'content-type': 'application/json' });`,
+        `  res.end(JSON.stringify(body));`,
+        `}`,
+        ``,
+        `const routes = [`
+      );
+      if (workflowResult) {
+        out.push(
+          `  { method: 'GET', path: '/shopping-list', respond: async (req, res) => json(res, shoppingResult) },`
+        );
+      }
+      for (const resource of resources) {
+        const record = spec.records.find((rec) => rec.name === resource.record)!;
+        out.push(...jsResourceRoutes(record));
+      }
+      out.push('];', '');
+      out.push(...jsRouterTail(spec.title, port));
+      return out.join('\n');
+    }
+
+    case 'go': {
+      const out: string[] = [
+        `// ${spec.title}: food-tracking from the system declaration (net/http)`,
+        `package main`,
+        ``,
+        `import (`,
+        `	"encoding/json"`,
+        `	"fmt"`,
+        `	"net/http"`,
+        ...(resources.length > 0 ? [`	"io"`, `	"strconv"`, `	"strings"`] : []),
+        `)`,
+        ``,
+        ...goRecordDeclarations(spec),
+        `func writeJSON(w http.ResponseWriter, body interface{}) {`,
+        `	w.Header().Set("Content-Type", "application/json")`,
+        `	json.NewEncoder(w).Encode(body)`,
+        `}`,
+        ``,
+      ];
+      const resourceRecords = spec.records.filter((r) =>
+        resources.some((res) => res.record === r.name)
+      );
+      for (const record of resourceRecords) {
+        out.push(...goStorePrelude(record));
+      }
+      if (workflowResult) {
+        out.push(
+          '// The embedded workflow\'s result, computed deterministically',
+          'const shoppingListJSON = `' +
+            JSON.stringify(workflowResult, null, 2) +
+            '`',
+          ``
+        );
+      }
+      out.push(`func main() {`);
+      if (workflowResult) {
+        out.push(
+          `\thttp.HandleFunc("/shopping-list", func(w http.ResponseWriter, req *http.Request) {`,
+          `\t\tif req.Method != "GET" {`,
+          `\t\t\tw.WriteHeader(http.StatusMethodNotAllowed)`,
+          `\t\t\treturn`,
+          `\t\t}`,
+          `\t\tw.Header().Set("Content-Type", "application/json")`,
+          `\t\tw.Write([]byte(shoppingListJSON))`,
+          `\t})`
+        );
+      }
+      for (const record of resourceRecords) {
+        out.push(...goResourceHandlers(record));
+      }
+      out.push(
+        `\tfmt.Println("${spec.title} listening on http://localhost:${port}")`,
+        `\thttp.ListenAndServe(":${port}", nil)`,
+        `}`,
+        ``
+      );
+      return out.join('\n');
+    }
+
+    default:
+      return undefined;
+  }
 }

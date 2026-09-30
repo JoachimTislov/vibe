@@ -52,6 +52,41 @@ system web-backend "Orders service" {
 }
 `;
 
+const FOODSAVR_SYSTEM = `# foodsavr as a declared system
+system food-tracking "foodsavr service" {
+    platform native
+
+    record Product {
+        id
+        name
+        category
+    }
+
+    workflow "Weekly groceries" {
+        reference-date 2026-10-01
+        horizon 7 days
+
+        collection pantry "Pantry" {
+            product Milk (dairy): 2 expiring 2026-10-04
+            product Pasta (dry goods): 4 non-expiring
+        }
+
+        consume Milk at 1 per day
+        consume Pasta at 0.5 per day
+    }
+
+    rules {
+        exclude expired stock
+        count expiring-soon stock
+    }
+
+    module shopping {
+        shopping-list
+        resource Product
+    }
+}
+`;
+
 const TOOL = `system cli "Shop tool" {
     module commands {
         command greet
@@ -84,6 +119,7 @@ describe('system DSL parsing', () => {
         jobs: [],
         cases: [],
         exports: [],
+        shoppingLists: [],
       },
     ]);
   });
@@ -342,6 +378,156 @@ describe('dispatch: a system document flows through its designated agent', () =>
     expect((result.produced.payload as { strategy: string }).strategy).toBe('system-dsl');
     expect(result.produced.text).toContain('job totals over Sale');
   });
+
+  it('the 5GL bridge: an embedded workflow inside a food-tracking system document', () => {
+    const doc = parseSystemDsl(FOODSAVR_SYSTEM);
+    expect(doc.domain).toBe('food-tracking');
+    expect(doc.title).toBe('foodsavr service');
+    expect(doc.spec.workflow?.title).toBe('Weekly groceries');
+
+    const workflowSpec = doc.spec.workflow!.spec;
+    expect(workflowSpec.referenceDate).toBe('2026-10-01');
+    expect(workflowSpec.horizonDays).toBe(7);
+    expect(workflowSpec.rules.countExpiredStock).toBe(false);
+    expect(workflowSpec.collections[0].products.map((p) => p.name)).toEqual(['Milk', 'Pasta']);
+    expect(doc.spec.modules[0].shoppingLists).toHaveLength(1);
+  });
+
+  it('the bridge round-trips: emitted DSL re-parses to the same system', () => {
+    const doc = parseSystemDsl(FOODSAVR_SYSTEM);
+    const emitted = systemSpecToDsl(doc.spec);
+    const reparsed = parseSystemDsl(emitted);
+    expect(reparsed.spec.records).toEqual(doc.spec.records);
+    expect(reparsed.spec.modules[0].shoppingLists).toHaveLength(1);
+    expect(reparsed.spec.modules[0].resources).toEqual(doc.spec.modules[0].resources);
+    expect(reparsed.spec.workflow?.spec).toEqual(doc.spec.workflow?.spec);
+  });
+
+  it('workflow and rules blocks are rejected outside food-tracking; shopping-list requires a workflow', () => {
+    const wrongDomain = `system data "x" {
+    workflow "W" {
+        horizon 7 days
+    }
+}
+`;
+    expect(() => parseSystemDsl(wrongDomain)).toThrow(/only valid in the food-tracking domain/);
+
+    const noWorkflow = `system food-tracking "x" {
+    module shopping {
+        shopping-list
+    }
+}
+`;
+    expect(() => parseSystemDsl(noWorkflow)).toThrow(/no workflow block/);
+  });
+
+  it('the bridge compiles: /shopping-list serves the embedded workflow result', () => {
+    const spec = parseSystemDsl(FOODSAVR_SYSTEM).spec;
+    const js = generateSystemCode(spec, 'javascript')!;
+    expect(js).toContain(`path: '/shopping-list'`);
+    // The workflow result is embedded deterministically
+    expect(js).toContain('"toBuy":5');
+    expect(js).toContain(`path: "/products/:id"`);
+
+    const go = generateSystemCode(spec, 'go')!;
+    expect(go).toContain('shoppingListJSON');
+    expect(go).toContain('productStore');
+    expect(go).toContain('http.HandleFunc("/shopping-list"');
+  });
+
+  it('dispatch routes the bridge document to the food-tracking agent', async () => {
+    const result = await engine.dispatch(FOODSAVR_SYSTEM, { produce: 'code', codeTarget: 'go' });
+    expect(result.agent).toBe('agent:food-tracking');
+    expect((result.produced.payload as { strategy: string }).strategy).toBe('system-dsl');
+    expect(result.produced.text).toContain('http.HandleFunc("/shopping-list"');
+    expect(result.standards.style).toBe('gofmt');
+  });
+
+  it('produce workflow-result runs the embedded workflow through the agent flow', async () => {
+    const result = await engine.dispatch(FOODSAVR_SYSTEM, { produce: 'workflow-result' });
+    expect(result.agent).toBe('agent:food-tracking');
+    expect(result.produced.kind).toBe('workflow-result');
+    const payload = result.produced.payload as {
+      workflowResult: { shoppingList: { product: string; toBuy: number }[] };
+      servicePayloads: unknown[];
+    };
+    expect(payload.workflowResult.shoppingList[0]).toMatchObject({ product: 'Milk', toBuy: 5 });
+    expect(payload.servicePayloads.length).toBeGreaterThan(0);
+  });
+
+  it('produce dsl re-emits the bridge document with its embedded workflow', async () => {
+    const result = await engine.dispatch(FOODSAVR_SYSTEM, { produce: 'dsl' });
+    expect(result.produced.text).toContain('workflow "Weekly groceries" {');
+    expect(result.produced.text).toContain('shopping-list');
+    // The emitted text re-parses to the same declaration
+    expect(parseSystemDsl(result.produced.text).spec.workflow?.spec).toBeDefined();
+  });
+
+  it('the bridge server serves the shopping list AND product CRUD over live HTTP', async () => {
+    const spec = parseSystemDsl(FOODSAVR_SYSTEM).spec;
+    const code = generateSystemCode(spec, 'javascript')!;
+    const file = path.join(os.tmpdir(), `univ-food-server-${Date.now()}.js`);
+    fs.writeFileSync(file, code);
+    const server = spawn('node', [file], { stdio: 'ignore' });
+
+    try {
+      const request = (
+        method: string,
+        urlPath: string,
+        body?: Record<string, unknown>
+      ) =>
+        new Promise<{ status: number; body: string }>((resolve, reject) => {
+          const req = http.request(
+            {
+              host: '127.0.0.1',
+              port: 8080,
+              path: urlPath,
+              method,
+              headers: body ? { 'content-type': 'application/json' } : {},
+            },
+            (res) => {
+              let data = '';
+              res.on('data', (chunk) => (data += chunk));
+              res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }));
+            }
+          );
+          req.on('error', reject);
+          if (body) req.write(JSON.stringify(body));
+          req.end();
+        });
+
+      let up = false;
+      for (let i = 0; i < 40 && !up; i++) {
+        try {
+          const list = await request('GET', '/shopping-list');
+          up = list.status === 200;
+        } catch {
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
+      expect(up).toBe(true);
+
+      // The embedded workflow's result, served
+      const list = await request('GET', '/shopping-list');
+      const parsed = JSON.parse(list.body);
+      expect(parsed.shoppingList[0]).toMatchObject({ product: 'Milk', toBuy: 5 });
+      expect(parsed.wasteAlerts[0]).toMatchObject({ product: 'Milk' });
+
+      // The declared resource CRUD, served alongside
+      const created = await request('POST', '/products', { name: 'Kale', category: 'produce' });
+      expect(created.status).toBe(201);
+      expect(JSON.parse(created.body)).toMatchObject({ id: 1, name: 'Kale' });
+      const got = await request('GET', '/products/1');
+      expect(JSON.parse(got.body).name).toBe('Kale');
+      const deleted = await request('DELETE', '/products/1');
+      expect(JSON.parse(deleted.body)).toEqual({ deleted: true });
+      const missing = await request('GET', '/products/1');
+      expect(missing.status).toBe(404);
+    } finally {
+      server.kill();
+      fs.unlinkSync(file);
+    }
+  }, 30_000);
 
   it('go resource codegen compiles (native artifact, no run)', async () => {
     const go = engine.toolchains.forLanguage('go');

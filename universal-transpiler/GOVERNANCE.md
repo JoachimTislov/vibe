@@ -162,6 +162,15 @@ Inside an agent, a parsed declarative document outranks both the
 deterministic scaffold and the LLM tier (`strategy: 'system-dsl'`): the
 document already specifies the artifact; generation is deterministic.
 
+**The bridge between the two 5GLs**: a food-tracking system document may
+embed a `workflow "<title>" { ... }` block (parsed by the workflow DSL
+grammar) and a `rules { ... }` block, and its modules may declare
+`shopping-list` items. The declaration then compiles to a server that
+serves the workflow's computed result at `/shopping-list` next to the
+declared resources' CRUD — one document carrying domain logic AND the
+system shell around it, proven over live HTTP (workflow result + CRUD
+lifecycle in one server).
+
 ## The dispatch flow: a designated agent per domain
 
 `engine.dispatch(source, request)` is the full flow through the universal

@@ -25,7 +25,12 @@
  *           job <name> over <Record>      (data)
  *           case <name>                   (testing)
  *           export <f>(i32 i32) -> i32    (wasm)
+ *           shopping-list                (food-tracking: needs a workflow)
  *       }
+ *
+ *       workflow "<title>" { ... }      (food-tracking: an embedded
+ *                                        workflow DSL body; rules block
+ *                                        follows the workflow grammar)
  *   }
  *
  * Comments (#) and blank lines are free-form; unknown domain ids are
@@ -33,6 +38,8 @@
  */
 
 import { DOMAIN_CATALOG } from './domain-analyzer';
+import { parseWorkflowDsl, specToDsl } from './workflow-dsl';
+import type { FoodWorkflowSpec } from './foodsavr';
 
 // ============================================================================
 // Types
@@ -78,6 +85,11 @@ export interface SystemExport {
   result: string;
 }
 
+/** A shopping-list endpoint item (food-tracking). */
+export interface SystemShoppingList {
+  record: string;
+}
+
 export interface SystemModule {
   name: string;
   endpoints: SystemEndpoint[];
@@ -86,6 +98,14 @@ export interface SystemModule {
   jobs: SystemJob[];
   cases: SystemTestCase[];
   exports: SystemExport[];
+  shoppingLists: SystemShoppingList[];
+}
+
+/** An embedded food workflow (the food-tracking bridge). */
+export interface SystemWorkflow {
+  title: string;
+  /** The composed FoodWorkflowSpec, parsed by the workflow DSL grammar */
+  spec: FoodWorkflowSpec;
 }
 
 export interface SystemSpec {
@@ -94,6 +114,7 @@ export interface SystemSpec {
   platform?: string;
   records: SystemRecord[];
   modules: SystemModule[];
+  workflow?: SystemWorkflow;
 }
 
 export interface ParsedSystemDocument {
@@ -156,17 +177,41 @@ export function parseSystemDsl(source: string): ParsedSystemDocument {
   };
 
   // ---- Body: a small block-structured walk ----
-  type Block = 'root' | 'record' | 'module';
+  type Block = 'root' | 'record' | 'module' | 'raw';
   let current: Block = 'root';
   let currentRecord: SystemRecord | undefined;
   let currentModule: SystemModule | undefined;
   let closed = false;
+
+  // Raw capture for the embedded workflow block (food-tracking): its body
+  // is parsed by the workflow DSL grammar after this walk
+  let workflowTitle: string | undefined;
+  const workflowBody: string[] = [];
+  const rulesBody: string[] = [];
+  let rawTarget: 'workflow' | 'rules' | null = null;
+  let rawDepth = 0;
 
   for (let i = 1; i < lines.length; i++) {
     const { text, line } = lines[i];
     if (closed) {
       throw new SystemDslError('nothing may follow the closing } of the system block', line);
     }
+    if (current === 'raw' && rawTarget) {
+      // Raw capture: count braces; the workflow body nests collections,
+      // so depth tracking decides where the block ends
+      const opens = (text.match(/{/g) || []).length;
+      const closes = (text.match(/}/g) || []).length;
+      if (closes > 0 && rawDepth + opens - closes === 0) {
+        current = 'root';
+        rawTarget = null;
+        rawDepth = 0;
+        continue;
+      }
+      rawDepth += opens - closes;
+      (rawTarget === 'workflow' ? workflowBody : rulesBody).push(text);
+      continue;
+    }
+
     if (text === '}') {
       if (current === 'root') {
         closed = true;
@@ -179,6 +224,32 @@ export function parseSystemDsl(source: string): ParsedSystemDocument {
     }
 
     if (current === 'root') {
+      const workflowMatch = text.match(/^workflow\s+"([^"]*)"\s+\{$/);
+      if (workflowMatch) {
+        if (domain !== 'food-tracking') {
+          throw new SystemDslError(
+            'an embedded workflow block is only valid in the food-tracking domain',
+            line
+          );
+        }
+        if (workflowTitle !== undefined) {
+          throw new SystemDslError('only one workflow block may be declared', line);
+        }
+        workflowTitle = workflowMatch[1];
+        rawTarget = 'workflow';
+        rawDepth = 1;
+        current = 'raw';
+        continue;
+      }
+      if (text === 'rules {') {
+        if (domain !== 'food-tracking') {
+          throw new SystemDslError('a rules block is only valid in the food-tracking domain', line);
+        }
+        rawTarget = 'rules';
+        rawDepth = 1;
+        current = 'raw';
+        continue;
+      }
       const platformMatch = text.match(/^platform\s+([a-z-]+)$/);
       if (platformMatch) {
         spec.platform = platformMatch[1];
@@ -202,6 +273,7 @@ export function parseSystemDsl(source: string): ParsedSystemDocument {
           jobs: [],
           cases: [],
           exports: [],
+          shoppingLists: [],
         };
         spec.modules.push(currentModule);
         continue;
@@ -247,6 +319,10 @@ export function parseSystemDsl(source: string): ParsedSystemDocument {
         currentModule.cases.push({ name: testCase[1] });
         continue;
       }
+      if (text === 'shopping-list') {
+        currentModule.shoppingLists.push({ record: '' });
+        continue;
+      }
       const wasmExport = text.match(/^export\s+([a-z][a-z0-9_]*)\(([^)]*)\)\s*->\s*(i32)$/);
       if (wasmExport) {
         const params = wasmExport[2]
@@ -270,6 +346,34 @@ export function parseSystemDsl(source: string): ParsedSystemDocument {
   }
   if (spec.modules.length === 0 && spec.records.length === 0) {
     warnings.push('document declares no modules and no records; the produced artifact is minimal');
+  }
+
+  // The embedded workflow: synthesize a standalone workflow document and
+  // parse it with the workflow DSL grammar (the 5GL bridge — a system
+  // declaration that carries domain logic)
+  if (workflowTitle !== undefined) {
+    const synthesized =
+      `workflow food-tracking "${workflowTitle}" {\n${workflowBody.join('\n')}\n}\n` +
+      (rulesBody.length > 0 ? `rules {\n${rulesBody.join('\n')}\n}\n` : '');
+    try {
+      const workflowDoc = parseWorkflowDsl(synthesized);
+      spec.workflow = { title: workflowTitle, spec: workflowDoc.spec };
+    } catch (err) {
+      throw new SystemDslError(
+        `embedded workflow: ${(err as Error).message}`,
+        header.line
+      );
+    }
+  }
+
+  // shopping-list endpoints require the embedded workflow
+  for (const module of spec.modules) {
+    if (module.shoppingLists.length > 0 && !spec.workflow) {
+      throw new SystemDslError(
+        `module "${module.name}" declares shopping-list but the document declares no workflow block`,
+        header.line
+      );
+    }
   }
 
   // Reference integrity: resources and jobs must point at declared records;
@@ -347,7 +451,30 @@ export function systemSpecToDsl(spec: SystemSpec): string {
     for (const exported of module.exports) {
       out.push(`        export ${exported.name}(${exported.params.join(' ')}) -> ${exported.result}`);
     }
+    for (const _ of module.shoppingLists) {
+      out.push('        shopping-list');
+    }
     out.push('    }');
+  }
+  if (spec.workflow) {
+    // The embedded workflow, re-emitted with the workflow DSL grammar
+    // (indented into the system block) so the document round-trips
+    const workflowDoc = specToDsl(spec.workflow.spec, spec.workflow.title);
+    const docLines = workflowDoc.split('\n');
+    const closeIdx = docLines.indexOf('}');
+    out.push('');
+    out.push(`    workflow "${spec.workflow.title}" {`);
+    for (const bodyLine of docLines.slice(1, closeIdx)) {
+      out.push(`    ${bodyLine}`);
+    }
+    out.push('    }');
+    const rulesLines = docLines.slice(closeIdx + 1).filter((l) => l.length > 0);
+    if (rulesLines.length > 0) {
+      out.push('');
+      for (const rulesLine of rulesLines) {
+        out.push(`    ${rulesLine}`);
+      }
+    }
   }
   out.push('}');
   return out.join('\n') + '\n';

@@ -371,6 +371,49 @@ grep -q 'hello written-by-cli' "$TMP/out-run.out" || fail "dispatch output: writ
 echo "ok - artifact written via --output and re-executed through the engine"
 pass=$((pass + 1))
 
+banner "dispatch foodsavr.system (the 5GL bridge: workflow inside a system)"
+cat > "$TMP/foodsavr.system" <<'SYS'
+system food-tracking "foodsavr service" {
+    record Product {
+        id
+        name
+        category
+    }
+
+    workflow "Weekly groceries" {
+        reference-date 2026-10-01
+        horizon 7 days
+
+        collection pantry "Pantry" {
+            product Milk (dairy): 2 expiring 2026-10-04
+            product Pasta (dry goods): 4 non-expiring
+        }
+
+        consume Milk at 1 per day
+        consume Pasta at 0.5 per day
+    }
+
+    rules {
+        exclude expired stock
+        count expiring-soon stock
+    }
+
+    module shopping {
+        shopping-list
+        resource Product
+    }
+}
+SYS
+node "$CLI" dispatch "$TMP/foodsavr.system" --produce code --code-target go --state "$STATE" > "$TMP/food.out" 2> "$TMP/food.err"
+grep -q 'agent: agent:food-tracking (domain food-tracking)' "$TMP/food.err" || fail "bridge: wrong agent routed"
+grep -q 'compiled the food-tracking system declaration' "$TMP/food.err" || fail "bridge: declaration not compiled"
+grep -q 'http.HandleFunc("/shopping-list"' "$TMP/food.out" || fail "bridge: shopping-list route missing"
+grep -q 'productStore' "$TMP/food.out" || fail "bridge: product store missing"
+node "$CLI" dispatch "$TMP/foodsavr.system" --produce workflow-result --state "$STATE" > "$TMP/food-wf.out" 2> "$TMP/food-wf.err"
+grep -q '"toBuy": 5' "$TMP/food-wf.out" || fail "bridge: embedded workflow result missing"
+echo "ok - the bridge: one document, embedded workflow + system shell"
+pass=$((pass + 1))
+
 banner "dispatch orders.system (the generalized 5GL system declaration)"
 cat > "$TMP/orders.system" <<'SYS'
 # The orders service, declared
