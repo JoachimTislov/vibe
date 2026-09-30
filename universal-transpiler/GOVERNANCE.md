@@ -157,7 +157,8 @@ Registered agents (`src/agents/`):
 |---|---|---|
 | `agent:food-tracking` | food-tracking | workflow result, shopping.v1 payloads, standalone code (js/ts/go/rust), DSL |
 | `agent:recipes` | recipes (also food-tracking) | composed spec from recipes + schedule + inventory, then the full food-tracking output |
-| `generic:generic` | every other domain | executes the source through the engine's routing |
+| `agent:web-frontend`, `agent:web-backend`, `agent:cli`, `agent:systems`, `agent:data`, `agent:game`, `agent:ml`, `agent:mobile`, `agent:wasm`, `agent:testing`, `agent:script` | every execution domain in the catalog | deterministic domain scaffolds (HTTP server, CLI, tests, data pipeline, threads...) in js/ts/go/rust/java/python, or engine-routed execution |
+| `generic:generic` | safety net | executes the source through the engine's routing |
 
 Agent routing is not hardcoded: the dispatch site builds a typed question
 (domain scores, matched keywords, input affinity) and the judgment model

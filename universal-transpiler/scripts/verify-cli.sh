@@ -341,6 +341,22 @@ echo "ok - dispatch routed to the designated food-tracking agent"
 sed 's/^/    /' "$TMP/dispatch.err"
 pass=$((pass + 1))
 
+banner "dispatch server.js --produce scaffold --code-target go (designated web-backend agent)"
+cat > "$TMP/server.js" <<'JS'
+const router = require('express');
+const http = require('http');
+const server = http.createServer((req, res) => res.send('ok'));
+app.listen(3000);
+JS
+node "$CLI" dispatch "$TMP/server.js" --produce scaffold --code-target go --state "$STATE" > "$TMP/scaffold.out" 2> "$TMP/scaffold.err"
+grep -q 'agent: agent:web-backend (domain web-backend)' "$TMP/scaffold.err" || fail "dispatch scaffold: wrong agent routed"
+grep -q 'package main' "$TMP/scaffold.out" || fail "dispatch scaffold: go scaffold missing"
+grep -q 'net/http' "$TMP/scaffold.out" || fail "dispatch scaffold: http server scaffold wrong"
+grep -q 'standards: style gofmt' "$TMP/scaffold.err" || fail "dispatch scaffold: go ecosystem standard missing"
+echo "ok - the web-backend agent produced a gofmt-standard net/http scaffold"
+sed 's/^/    /' "$TMP/scaffold.err" | head -6
+pass=$((pass + 1))
+
 banner "dispatch weekly.dsl --produce code --code-target go"
 node "$CLI" dispatch "$TMP/weekly.dsl" --produce code --code-target go --state "$STATE" > "$TMP/dispatch-go.out" 2> "$TMP/dispatch-go.err"
 grep -q 'package main' "$TMP/dispatch-go.out" || fail "dispatch code: go program missing"

@@ -18,7 +18,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { UniversalEngine } from '../src/engine/universal-engine';
-import type { JudgmentModel } from '../src/engine/judgment';
+import type { Judgment, JudgmentModel, JudgmentQuestion } from '../src/engine/judgment';
 import type { DomainAgentFlowResult } from '../src/agents/domain-agent';
 
 let engine: UniversalEngine;
@@ -94,14 +94,36 @@ describe('agent registry', () => {
   it('resolves the designated agent per domain', () => {
     expect(engine.agents.forDomain('food-tracking')?.id).toBe('agent:food-tracking');
     expect(engine.agents.forDomain('recipes')?.id).toBe('agent:recipes');
-    // The generic fallback serves every other domain
-    expect(engine.agents.forDomain('web-backend')?.id).toBe('generic:generic');
+    // Every execution domain in the catalog has a designated runtime agent
+    expect(engine.agents.forDomain('web-backend')?.id).toBe('agent:web-backend');
+    expect(engine.agents.forDomain('cli')?.id).toBe('agent:cli');
+    expect(engine.agents.forDomain('web-frontend')?.id).toBe('agent:web-frontend');
+    expect(engine.agents.forDomain('systems')?.id).toBe('agent:systems');
+    expect(engine.agents.forDomain('data')?.id).toBe('agent:data');
+    expect(engine.agents.forDomain('testing')?.id).toBe('agent:testing');
+    // Unknown domains still resolve to the generic fallback
+    expect(engine.agents.forDomain('does-not-exist')?.acceptsAll).toBe(true);
   });
 
-  it('registers the three flow agents plus the fallback', () => {
+  it('registers a designated agent for every catalog domain plus the fallback', () => {
     const ids = engine.agents.all().map((a) => a.id);
     expect(ids).toEqual(
-      expect.arrayContaining(['agent:food-tracking', 'agent:recipes', 'generic:generic'])
+      expect.arrayContaining([
+        'agent:food-tracking',
+        'agent:recipes',
+        'agent:web-backend',
+        'agent:web-frontend',
+        'agent:cli',
+        'agent:systems',
+        'agent:data',
+        'agent:game',
+        'agent:ml',
+        'agent:mobile',
+        'agent:wasm',
+        'agent:testing',
+        'agent:script',
+        'generic:generic',
+      ])
     );
   });
 });
@@ -181,12 +203,81 @@ describe('recipes agent: composition flow', () => {
   });
 });
 
+describe('runtime domain agents (execution domains)', () => {
+  it('executes source through the engine routing under its designated agent', async () => {
+    const result = await engine.dispatch('console.log("hello from the designated agent");\n', {
+      language: 'javascript',
+    });
+    expect(result.agent).toBe('agent:script');
+    expect(result.produced.kind).toBe('engine-run');
+    expect((result.produced.payload as { ok: boolean }).ok).toBe(true);
+    expect(result.produced.text).toContain('hello from the designated agent');
+  });
+
+  it('produces a deterministic web-backend scaffold per target language', async () => {
+    const server = 'const router = require("express");\napp.listen(3000);\nres.send("ok");\n';
+    const go = await engine.dispatch(server, { produce: 'scaffold', codeTarget: 'go' });
+    expect(go.agent).toBe('agent:web-backend');
+    expect(go.produced.kind).toBe('scaffold');
+    expect(go.produced.text).toContain('net/http');
+    expect(go.produced.text).toContain('package main');
+
+    const rust = await engine.dispatch(server, { produce: 'scaffold', codeTarget: 'rust' });
+    expect(rust.produced.text).toContain('TcpListener');
+
+    const js = await engine.dispatch(server, { produce: 'scaffold', codeTarget: 'javascript' });
+    expect(js.produced.text).toContain('http.createServer');
+  });
+
+  it('scaffold requests without a scaffold for the domain execute instead', async () => {
+    // game domain has no scaffold generator: the agent executes the source
+    const result = await engine.dispatch('println("game loop");\n', {
+      domain: 'game',
+      produce: 'scaffold',
+      language: 'rust',
+    });
+    expect(result.agent).toBe('agent:game');
+    expect(result.produced.kind).toBe('engine-run');
+    expect(result.notes.join(' ')).toContain('no');
+  });
+
+  it('the cli scaffold runs and honors its target ecosystem standards', async () => {
+    const result = await engine.dispatch('func main() { println!("hi") }\n', {
+      domain: 'cli',
+      produce: 'scaffold',
+      codeTarget: 'go',
+      language: 'rust',
+    });
+    expect(result.produced.kind).toBe('scaffold');
+    expect(result.produced.text).toContain('flag.Parse');
+    // go target -> go ecosystem standard by default
+    expect(result.standards.style).toBe('gofmt');
+  });
+});
+
 describe('generic fallback agent', () => {
-  it('executes non-domain source through the engine routing', async () => {
-    const result = await engine.dispatch('console.log("hello from the generic agent");\n', {
+  it('runs when the judgment model explicitly routes to it (the safety net)', async () => {
+    const toGeneric: JudgmentModel = {
+      name: 'to-generic',
+      decide: <T extends string>(q: JudgmentQuestion<T>) => {
+        const generic = q.options.find((o) => o.value === 'generic:generic');
+        return Promise.resolve<Judgment<T>>({
+          choice: generic ? generic.value : q.options[0].value,
+          confidence: 0.5,
+          model: 'to-generic',
+        });
+      },
+    };
+    const routed = new UniversalEngine({
+      statePath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'univ-generic-')), 's.json'),
+      judgmentModel: toGeneric,
+      decisionPolicy: { judgmentModel: 'to-generic' },
+    });
+    const result = await routed.dispatch('console.log("hello from the generic agent");\n', {
       language: 'javascript',
     });
     expect(result.agent).toBe('generic:generic');
+    expect(result.judgment?.model).toBe('to-generic');
     expect(result.produced.kind).toBe('engine-run');
     expect((result.produced.payload as { ok: boolean }).ok).toBe(true);
     expect(result.produced.text).toContain('hello from the generic agent');

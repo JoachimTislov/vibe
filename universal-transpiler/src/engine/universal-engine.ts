@@ -56,6 +56,7 @@ import {
 } from '../agents/domain-agent';
 import { FoodTrackingAgent } from '../agents/foodsavr-agent';
 import { RecipesAgent } from '../agents/recipes-agent';
+import { RuntimeDomainAgent } from '../agents/runtime-agent';
 import { parseWorkflowDsl } from '../domains/workflow-dsl';
 import type { FoodWorkflowSpec } from '../domains/foodsavr';
 import type { FeedbackRecord, Goal } from './persistent-state';
@@ -167,6 +168,25 @@ const PLATFORM_FALLBACK_PREFERENCES: Record<string, string[]> = {
   auto: ['javascript', 'go', 'python'],
 };
 
+/**
+ * The execution domains of the catalog (DOMAIN_CATALOG minus the domain
+ * specialists): each gets a designated RuntimeDomainAgent. Data for the
+ * agent registry construction.
+ */
+const RUNTIME_AGENT_DOMAINS: string[] = [
+  'web-frontend',
+  'web-backend',
+  'cli',
+  'systems',
+  'data',
+  'game',
+  'ml',
+  'mobile',
+  'wasm',
+  'testing',
+  'script',
+];
+
 export class UniversalEngine {
   readonly toolchains: ToolchainRegistry;
   readonly matrix: TranspileMatrix;
@@ -230,12 +250,17 @@ export class UniversalEngine {
     this.judgment = new JudgmentModelRegistry();
     if (options.judgmentModel) this.judgment.register(options.judgmentModel);
 
-    // Domain agents: one designated agent per registered domain, generic
-    // fallback last so specialists always win when they can handle input
+    // Domain agents: one designated agent per registered domain. Domain
+    // specialists first (food workflows, recipes), then a runtime agent
+    // for every execution domain in the catalog, generic fallback last
+    // so specialists always win when they can handle the input.
     this.agents = new DomainAgentRegistry()
       .register(new FoodTrackingAgent(this))
-      .register(new RecipesAgent(this))
-      .register(new GenericDomainAgent(this));
+      .register(new RecipesAgent(this));
+    for (const domain of RUNTIME_AGENT_DOMAINS) {
+      this.agents.register(new RuntimeDomainAgent(this, domain));
+    }
+    this.agents.register(new GenericDomainAgent(this));
 
     this.options = {
       defaultPlatform: 'auto',

@@ -42,10 +42,11 @@ export interface DomainAgentFlowRequest {
    * - 'auto' (default): the agent decides from the input and its domain
    * - 'workflow-result': run the domain's reference implementation
    * - 'code': generate standalone code in `codeTarget`
+   * - 'scaffold': generate a domain-typical project scaffold in `codeTarget`
    * - 'run': execute the source through the engine
    * - 'dsl': emit the 5GL DSL document for the input
    */
-  produce?: 'auto' | 'workflow-result' | 'code' | 'run' | 'dsl';
+  produce?: 'auto' | 'workflow-result' | 'code' | 'scaffold' | 'run' | 'dsl';
   /** Target language for produce: 'code' */
   codeTarget?: string;
   /** The agent-selection judgment that dispatched this agent (trace) */
@@ -53,7 +54,7 @@ export interface DomainAgentFlowRequest {
 }
 
 export interface DomainAgentProduced {
-  kind: 'workflow-result' | 'generated-code' | 'engine-run' | 'dsl-document';
+  kind: 'workflow-result' | 'generated-code' | 'engine-run' | 'dsl-document' | 'scaffold';
   /** Machine-readable payload when the kind carries one */
   payload?: unknown;
   /** Human-readable text output (code, DSL, program stdout) */
