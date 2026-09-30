@@ -166,6 +166,31 @@ decides. An agent that can structurally parse the input (DSL document,
 recipes document) outranks one that merely shares vocabulary. The routing
 decision is traced in the persistent progress log (`agent-dispatch`).
 
+
+### Production tiers inside an agent
+
+Determinism first, generation on demand — the tiers an agent walks when
+producing:
+
+1. **Native toolchain** — the source compiles/runs as-is (docker fallback
+   for missing binaries).
+2. **Structural transpilers** — verified language pairs, deterministic.
+3. **Deterministic domain scaffolds** — dependency-free, generated
+   code for the domain+target (HTTP server, CLI, test module, data
+   pipeline, threads...). Identical input yields identical code, and
+   every runnable scaffold is executed by the test suite before a client
+   ever receives it.
+4. **LLM tier (Mistral)** — when no scaffold exists for the domain and
+   target, the agent generates domain code on the fly: a prompt built
+   from the structured interpretation (never free-form intent), demanding
+   standard-library-only, standalone-runnable code under the resolved
+   standards. Deterministic scaffolds are preferred where they exist;
+   the LLM is reserved for cases without one.
+
+The judgment layer stays orthogonal: it decides *which* agent and
+*whether* (routing, promotion, retry); tiers above decide *how* to
+produce once the decision is made.
+
 The agents honor the contract above end to end: they run under the
 request's scope, produce under the resolved standards, ingest vocabulary
 through the system's corroboration rules (persist-on-encounter), and never
