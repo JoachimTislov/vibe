@@ -34,11 +34,11 @@ import type {
 export interface PluginManifest {
   name: string;
   version: string;
-  description: string;
-  author: string;
+  description?: string;
+  author?: string;
   license?: string;
   homepage?: string;
-  repository?: string;
+  repository?: string | { type: string; url: string };
   keywords?: string[];
   
   // Plugin capabilities
@@ -275,12 +275,14 @@ export class PluginMarketplace {
   private loadedPlugins: Set<string>;
   
   private llm?: LLMClient;
-  private cache?: CacheManager;
+  /** Cache configured via the constructor or setCacheManager. */
+  cache?: CacheManager;
   private marketplaceClients: Map<string, MarketplaceClient>;
   private learningDatabase?: LearningDatabase;
   
   private hooks: Map<PluginHook, PluginHookHandler[]>;
-  private collaborativeLearningEnabled: boolean;
+  /** Whether collaborative learning is enabled (set via setCollaborativeLearning). */
+  collaborativeLearningEnabled: boolean;
   
   private options: {
     pluginDir: string;
@@ -509,11 +511,11 @@ export class PluginMarketplace {
   }
 
   private buildDependencyGraph(): void {
-    for (const [name, plugin] of this.plugins) {
+    for (const [_name, plugin] of this.plugins) {
       const manifest = plugin.manifest;
       
       if (manifest.dependencies) {
-        for (const [depName, depVersion] of Object.entries(manifest.dependencies)) {
+        for (const [depName, _depVersion] of Object.entries(manifest.dependencies)) {
           const depPlugin = this.plugins.get(depName);
           if (depPlugin) {
             plugin.dependencies.set(depName, depPlugin);
@@ -665,7 +667,7 @@ export class PluginMarketplace {
     // This would use Node.js vm module or similar
     
     try {
-      const content = await fs.promises.readFile(mainPath, 'utf-8');
+      await fs.promises.readFile(mainPath, 'utf-8');
       
       // Simple sandbox - in real implementation, use vm module
       const sandbox: PluginSandbox = {
@@ -717,49 +719,49 @@ export class PluginMarketplace {
     // Register languages
     if (moduleExports.languages) {
       for (const langDef of Object.values(moduleExports.languages)) {
-        this.registerLanguageFromPlugin(plugin, langDef);
+        this.registerLanguageFromPlugin(plugin, langDef as LanguageDefinition);
       }
     }
     
     // Register parsers
     if (moduleExports.parsers) {
       for (const [name, parser] of Object.entries(moduleExports.parsers)) {
-        this.registerParserFromPlugin(plugin, name, parser);
+        this.registerParserFromPlugin(plugin, name, parser as Parser);
       }
     }
     
     // Register compilers
     if (moduleExports.compilers) {
       for (const [name, compiler] of Object.entries(moduleExports.compilers)) {
-        this.registerCompilerFromPlugin(plugin, name, compiler);
+        this.registerCompilerFromPlugin(plugin, name, compiler as Compiler);
       }
     }
     
     // Register interpreters
     if (moduleExports.interpreters) {
       for (const [name, interpreter] of Object.entries(moduleExports.interpreters)) {
-        this.registerInterpreterFromPlugin(plugin, name, interpreter);
+        this.registerInterpreterFromPlugin(plugin, name, interpreter as Interpreter);
       }
     }
     
     // Register transforms
     if (moduleExports.transforms) {
       for (const [name, transform] of Object.entries(moduleExports.transforms)) {
-        this.registerTransformFromPlugin(plugin, name, transform);
+        this.registerTransformFromPlugin(plugin, name, transform as Transform);
       }
     }
     
     // Register domains
     if (moduleExports.domains) {
       for (const [name, domain] of Object.entries(moduleExports.domains)) {
-        this.registerDomainFromPlugin(plugin, name, domain);
+        this.registerDomainFromPlugin(plugin, name, domain as DomainDefinition);
       }
     }
     
     // Register fifthGL
     if (moduleExports.fifthGL) {
       for (const [name, fg] of Object.entries(moduleExports.fifthGL)) {
-        this.registerFifthGLFromPlugin(plugin, name, fg);
+        this.registerFifthGLFromPlugin(plugin, name, fg as FifthGLDefinition);
       }
     }
     
@@ -779,13 +781,6 @@ export class PluginMarketplace {
     plugin: InstalledPlugin,
     langDef: LanguageDefinition
   ): void {
-    // Add plugin metadata to the language definition
-    const augmentedLangDef: LanguageDefinition = {
-      ...langDef,
-      plugin: plugin.manifest.name,
-      pluginVersion: plugin.manifest.version,
-    };
-    
     // In a real implementation, would register with the transpiler
     this.log(`Registered language ${langDef.name} from plugin ${plugin.manifest.name}`);
   }
@@ -793,7 +788,7 @@ export class PluginMarketplace {
   private registerParserFromPlugin(
     plugin: InstalledPlugin,
     name: string,
-    parser: Parser
+    _parser: Parser
   ): void {
     // In a real implementation, would register with the transpiler
     this.log(`Registered parser ${name} from plugin ${plugin.manifest.name}`);
@@ -802,7 +797,7 @@ export class PluginMarketplace {
   private registerCompilerFromPlugin(
     plugin: InstalledPlugin,
     name: string,
-    compiler: Compiler
+    _compiler: Compiler
   ): void {
     this.log(`Registered compiler ${name} from plugin ${plugin.manifest.name}`);
   }
@@ -810,7 +805,7 @@ export class PluginMarketplace {
   private registerInterpreterFromPlugin(
     plugin: InstalledPlugin,
     name: string,
-    interpreter: Interpreter
+    _interpreter: Interpreter
   ): void {
     this.log(`Registered interpreter ${name} from plugin ${plugin.manifest.name}`);
   }
@@ -818,7 +813,7 @@ export class PluginMarketplace {
   private registerTransformFromPlugin(
     plugin: InstalledPlugin,
     name: string,
-    transform: Transform
+    _transform: Transform
   ): void {
     this.log(`Registered transform ${name} from plugin ${plugin.manifest.name}`);
   }
@@ -826,7 +821,7 @@ export class PluginMarketplace {
   private registerDomainFromPlugin(
     plugin: InstalledPlugin,
     name: string,
-    domain: DomainDefinition
+    _domain: DomainDefinition
   ): void {
     this.log(`Registered domain ${name} from plugin ${plugin.manifest.name}`);
   }
@@ -834,7 +829,7 @@ export class PluginMarketplace {
   private registerFifthGLFromPlugin(
     plugin: InstalledPlugin,
     name: string,
-    fg: FifthGLDefinition
+    _fg: FifthGLDefinition
   ): void {
     this.log(`Registered 5GL ${name} from plugin ${plugin.manifest.name}`);
   }

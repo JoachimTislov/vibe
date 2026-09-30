@@ -18,7 +18,7 @@ import type { LLMClient, LLMPrompt, LLMResponse, LLMOptions } from '../core/univ
 
 export interface SelfHostedLLMOptions extends LLMOptions {
   // Provider type
-  provider: 'ollama' | 'lmstudio' | 'openai-compatible' | 'custom';
+  provider?: 'ollama' | 'lmstudio' | 'openai-compatible' | 'custom';
   
   // Base URL for the server
   baseUrl?: string;
@@ -743,7 +743,7 @@ export async function detectSelfHostedLLMs(): Promise<{
   
   // Check LM Studio
   try {
-    const lmstudio = new LMStudioClient({});
+    new LMStudioClient({});
     results.push({
       provider: 'lmstudio',
       baseUrl: 'http://localhost:1234',
@@ -956,11 +956,9 @@ Generated code:`,
  */
 export class EnhancedLLMClient implements LLMClient {
   private client: LLMClient;
-  private options: SelfHostedLLMOptions;
 
-  constructor(client: LLMClient, options: SelfHostedLLMOptions = {}) {
+  constructor(client: LLMClient, _options: SelfHostedLLMOptions = {}) {
     this.client = client;
-    this.options = options;
   }
 
   async generate(prompt: LLMPrompt, options?: LLMOptions): Promise<LLMResponse> {
@@ -972,7 +970,6 @@ export class EnhancedLLMClient implements LLMClient {
   private enhancePrompt(prompt: LLMPrompt): LLMPrompt {
     // Analyze the user request and apply appropriate template
     const userLower = prompt.user.toLowerCase();
-    const systemLower = prompt.system.toLowerCase();
     
     // Check for code generation patterns
     if (userLower.includes('generate') && userLower.includes('code')) {
@@ -1115,20 +1112,5 @@ export class EnhancedLLMClient implements LLMClient {
     return this.client.generateTransform(description, examples);
   }
 }
-
-// ============================================================================
-// Exports
-// ============================================================================
-
-export {
-  createSelfHostedLLMClient,
-  detectSelfHostedLLMs,
-  OllamaClient,
-  LMStudioClient,
-  OpenAICompatibleClient,
-  CustomLLMClient,
-  EnhancedLLMClient,
-  PROMPT_TEMPLATES,
-};
 
 export default createSelfHostedLLMClient;

@@ -12,7 +12,6 @@
  */
 
 import type { 
-  ASTNode,
   TranspileOptions,
   TranspileResult,
   Parser,
@@ -37,7 +36,7 @@ export interface PeerInfo {
 }
 
 export interface NetworkMessage {
-  type: 'transpile' | 'cache_get' | 'cache_set' | 'parser_request' | 'learn' | 'ping' | 'error';
+  type: 'transpile' | 'cache_get' | 'cache_set' | 'parser_request' | 'learn' | 'ping' | 'pong' | 'error';
   id: string;
   from: string;
   to?: string;
@@ -73,6 +72,8 @@ export interface CacheResponse {
   value?: any;
   entries?: CacheEntry[];
   error?: string;
+  ttl?: number;
+  metadata?: any;
 }
 
 export interface ParserRequest {
@@ -942,7 +943,8 @@ export class NetworkServer {
 
   async start(): Promise<void> {
     try {
-      const express = await import('express');
+      // express is an optional runtime dependency; only needed for server mode
+      const express = require('express');
       const app = express.default();
       
       // Middleware
@@ -1027,7 +1029,7 @@ export class NetworkServer {
         }
       });
       
-      app.post('/learn/sync', async (req: any, res: any) => {
+      app.post('/learn/sync', async (_req: any, res: any) => {
         try {
           const items = await this.collaborativeLearning.list();
           res.json(items);
@@ -1037,7 +1039,7 @@ export class NetworkServer {
       });
       
       // Info endpoint
-      app.get('/info', (req: any, res: any) => {
+      app.get('/info', (_req: any, res: any) => {
         res.json({
           id: this.peerDiscovery['peerId'],
           address: this.peerDiscovery['address'],
@@ -1076,7 +1078,8 @@ export class NetworkManager {
   private peerDiscovery: PeerDiscovery;
   private distributedTranspiler: DistributedTranspiler;
   private networkServer: NetworkServer;
-  private localCache: CacheManager;
+  /** Local cache manager coordinated over the network. */
+  localCache: CacheManager;
   private localTranspiler: any;
   private running = false;
 
@@ -1193,33 +1196,12 @@ export function createNetworkManager(
 // ============================================================================
 
 export {
-  PeerDiscovery,
-  DistributedCache,
-  CollaborativeLearning,
-  DistributedTranspiler,
-  NetworkServer,
-  NetworkManager,
-  createNetworkManager,
   DEFAULT_PORT,
   DEFAULT_BROADCAST_PORT,
   DEFAULT_TIMEOUT,
   MESSAGE_TTL,
   PING_INTERVAL,
   PEER_TIMEOUT,
-};
-
-export type {
-  PeerInfo,
-  NetworkMessage,
-  TranspileRequest,
-  TranspileResponse,
-  CacheRequest,
-  CacheResponse,
-  ParserRequest,
-  ParserResponse,
-  LearnRequest,
-  LearnResponse,
-  NetworkConfig,
 };
 
 export default NetworkManager;

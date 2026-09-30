@@ -102,8 +102,10 @@ export class RustToolchain implements Toolchain {
       writeSourceFile(workDir, entryFile, source);
       const platform = options.platform || 'native';
       const target = platform === 'wasm' ? 'wasm32-unknown-unknown' : platform === 'wasi' ? 'wasm32-wasi' : null;
-      const outName = 'program';
-      const compileCmd = `rustc ${entryFile} -o ${outName} ${target ? `--target ${target}` : ''} ${options.release ? '-O' : ''}`.replace(/\s+/g, ' ');
+      const outName = target ? 'program.wasm' : 'program';
+      // WebAssembly targets need their std installed in the container first
+      const targetSetup = target ? `rustup target add ${target} && ` : '';
+      const compileCmd = `${targetSetup}rustc ${entryFile} -o ${outName} ${target ? `--target ${target}` : ''} ${options.release ? '-O' : ''}`.replace(/\s+/g, ' ');
       const result = await runInDocker(
         this.info.versions['docker-fallback'],
         ['bash', '-c', compileCmd],
@@ -116,12 +118,15 @@ export class RustToolchain implements Toolchain {
 
     const entryFile = options.entryFile || 'main.rs';
     const filePath = writeSourceFile(workDir, entryFile, source);
-    const outPath = options.outputPath || path.join(workDir, 'program');
+    let outPath = options.outputPath || path.join(workDir, 'program');
 
     const platform = options.platform || 'native';
     let targetArgs: string[] = [];
     if (platform === 'wasm' || platform === 'wasi') {
       targetArgs = ['--target', platform === 'wasm' ? 'wasm32-unknown-unknown' : 'wasm32-wasi'];
+    }
+    if ((platform === 'wasm' || platform === 'wasi') && !outPath.endsWith('.wasm')) {
+      outPath = `${outPath}.wasm`;
     }
 
     const args = [

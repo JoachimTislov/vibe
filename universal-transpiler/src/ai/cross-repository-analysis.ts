@@ -11,7 +11,7 @@
 
 import * as crypto from 'crypto';
 import type { ASTNode, Position } from '../core/universal-transpiler';
-import type { LLMClient, CacheManager } from '../llm/mistral-client';
+import type { LLMClient, CacheManager } from '../core/universal-transpiler';
 import type { CodeUnderstanding } from './autonomous-code-understanding';
 
 // ============================================================================
@@ -25,8 +25,8 @@ export interface RepositoryInfo {
   description?: string;
   language?: string;
   domain?: string;
-  size: number;
-  fileCount: number;
+  size?: number;
+  fileCount?: number;
   lastCommit?: string;
   metadata?: Record<string, any>;
 }
@@ -36,7 +36,7 @@ export interface RepositoryFile {
   content: string;
   size: number;
   language?: string;
-  hash: string;
+  hash?: string;
   ast?: ASTNode;
   understanding?: CodeUnderstanding;
   metadata?: Record<string, any>;
@@ -74,7 +74,7 @@ interface CodeLocation {
 export interface RepositoryPattern {
   id: string;
   name: string;
-  kind: 'structural' | 'behavioral' | 'architectural' | 'idiomatic';
+  kind: 'creational' | 'structural' | 'behavioral' | 'architectural' | 'idiomatic';
   description: string;
   occurrences: PatternOccurrence[];
   relatedPatterns: string[];
@@ -222,11 +222,9 @@ export class CrossRepositoryAnalyzer {
   private repositories: Map<string, RepositoryInfo> = new Map();
   private files: Map<string, Map<string, RepositoryFile>> = new Map();
   private analysis: Map<string, RepositoryAnalysis> = new Map();
-  private patterns: Map<string, RepositoryPattern> = new Map();
   private relationships: Map<string, RepositoryRelationship[]> = new Map();
   
   private llm?: LLMClient;
-  private cache?: CacheManager;
   
   private options: {
     enableCaching: boolean;
@@ -237,9 +235,8 @@ export class CrossRepositoryAnalyzer {
     debug: boolean;
   };
 
-  constructor(llm?: LLMClient, cache?: CacheManager, options?: Partial<CrossRepositoryAnalyzer['options']>) {
+  constructor(llm?: LLMClient, _cache?: CacheManager, options?: Partial<CrossRepositoryAnalyzer['options']>) {
     this.llm = llm;
-    this.cache = cache;
     this.options = {
       enableCaching: true,
       enableLLM: true,
@@ -305,7 +302,7 @@ export class CrossRepositoryAnalyzer {
   // Analysis
   // ==========================================================================
 
-  async analyzeRepository(repositoryId: string, options: { includeFiles?: boolean } = {}): Promise<RepositoryAnalysis | null> {
+  async analyzeRepository(repositoryId: string, _options: { includeFiles?: boolean } = {}): Promise<RepositoryAnalysis | null> {
     const repoInfo = this.repositories.get(repositoryId);
     if (!repoInfo) return null;
     
@@ -331,7 +328,7 @@ export class CrossRepositoryAnalyzer {
     analysis.patterns = await this.findPatterns(repositoryId, repoFiles);
     
     // Find relationships with other repos
-    analysis.relationships = await this.findRelationships(repositoryId);
+    analysis.relationships = await this.findRelationships(repositoryId, analysis);
     
     this.analysis.set(repositoryId, analysis);
     return analysis;
@@ -393,7 +390,9 @@ export class CrossRepositoryAnalyzer {
             dependencies.set(key, {
               name: dep.name,
               version: dep.version,
-              kind: dep.kind,
+              // Import-derived dependencies: type/inheritance links are internal
+              // to the codebase, runtime imports are external modules.
+              kind: dep.kind === 'type' || dep.kind === 'inheritance' ? 'internal' : 'external',
               usage: [],
               confidence: dep.confidence,
             });
@@ -423,7 +422,7 @@ export class CrossRepositoryAnalyzer {
     return Array.from(dependencies.values());
   }
 
-  private extractDependenciesFromAST(ast: ASTNode, repositoryId: string, filePath: string, dependencies: Map<string, RepositoryDependency>): void {
+  private extractDependenciesFromAST(ast: ASTNode, _repositoryId: string, filePath: string, dependencies: Map<string, RepositoryDependency>): void {
     const visit = (node: ASTNode) => {
       if (node.type === 'ImportDeclaration') {
         const source = String(node.value?.source || '');
@@ -491,7 +490,7 @@ ${content}`,
     }
   }
 
-  private async findPatterns(repositoryId: string, files: Map<string, RepositoryFile>): Promise<RepositoryPattern[]> {
+  private async findPatterns(_repositoryId: string, files: Map<string, RepositoryFile>): Promise<RepositoryPattern[]> {
     const patternMap: Map<string, RepositoryPattern> = new Map();
     
     for (const file of files.values()) {
@@ -564,12 +563,11 @@ ${content}`,
     const patterns: RepositoryPattern[] = [];
     const patternCounts: Record<string, { node: ASTNode; count: number }> = {};
     
-    const visit = (node: ASTNode, parent?: ASTNode) => {
+    const visit = (node: ASTNode, _parent?: ASTNode) => {
       // Detect design patterns based on AST structure
       
       // Singleton pattern
       if (node.type === 'ClassDeclaration') {
-        const className = String(node.value?.name || '');
         const hasPrivateConstructor = node.children?.some(c => 
           c.type === 'MethodDefinition' && 
           String(c.value?.name) === 'constructor' &&
@@ -663,7 +661,10 @@ ${content}`,
     }
   }
 
-  private async findRelationships(repositoryId: string): Promise<RepositoryRelationship[]> {
+  private async findRelationships(
+    repositoryId: string,
+    currentAnalysis: RepositoryAnalysis
+  ): Promise<RepositoryRelationship[]> {
     const relationships: RepositoryRelationship[] = [];
     const repoInfo = this.repositories.get(repositoryId);
     if (!repoInfo) return relationships;
@@ -688,18 +689,15 @@ ${content}`,
       const otherFiles = this.files.get(otherId);
       
       if (repoFiles && otherFiles) {
-        const analysis = await this.analyzeRepository(repositoryId);
-        if (analysis) {
-          for (const dep of analysis.dependencies) {
-            if (dep.name === otherInfo.name || dep.resolved?.id === otherId) {
-              relationships.push({
-                kind: 'dependency',
-                target: otherId,
-                strength: dep.confidence,
-                direction: 'out',
-                details: dep,
-              });
-            }
+        for (const dep of currentAnalysis.dependencies) {
+          if (dep.name === otherInfo.name || dep.resolved?.id === otherId) {
+            relationships.push({
+              kind: 'dependency',
+              target: otherId,
+              strength: dep.confidence,
+              direction: 'out',
+              details: dep,
+            });
           }
         }
       }
@@ -708,7 +706,7 @@ ${content}`,
     return relationships;
   }
 
-  private async calculateRepositorySimilarity(repoId1: string, repoId2: string): Promise<number> {
+  async calculateRepositorySimilarity(repoId1: string, repoId2: string): Promise<number> {
     const files1 = this.files.get(repoId1);
     const files2 = this.files.get(repoId2);
     
@@ -808,8 +806,6 @@ ${file2.content}`,
   // ==========================================================================
 
   async query(query: CrossRepositoryQuery): Promise<CrossRepositoryResult> {
-    const startTime = Date.now();
-    
     // Filter repositories
     let repositories = Array.from(this.repositories.values());
     
@@ -1058,7 +1054,7 @@ ${file2.content}`,
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 10)
-      .map((pc, i) => ({
+      .map((pc) => ({
         id: this.generateId(),
         name: pc.name,
         kind: 'architectural',
@@ -1080,7 +1076,7 @@ ${file2.content}`,
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 10)
-      .map((dc, i) => ({
+      .map((dc) => ({
         name: dc.name,
         kind: 'external',
         usage: [],
@@ -1102,7 +1098,7 @@ ${file2.content}`,
     this.log(`Added commit to ${repositoryId}: ${commit.hash}`);
   }
 
-  async trackEvolution(repositoryId: string): Promise<RepositoryEvolution | null> {
+  async trackEvolution(_repositoryId: string): Promise<RepositoryEvolution | null> {
     // In a real implementation, would analyze commit history
     // and calculate evolution metrics
     return null;

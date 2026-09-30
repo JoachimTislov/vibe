@@ -136,7 +136,7 @@ export interface ExtensionRequest {
 }
 
 export interface SelfExtendingEvent {
-  type: 'language-added' | 'compiler-added' | 'transform-added' | 'learning-started' | 'learning-completed' | 'error';
+  type: 'language-added' | 'compiler-added' | 'transform-added' | 'sample-added' | 'learning-started' | 'learning-completed' | 'error';
   timestamp: number;
   data: any;
   metadata?: Record<string, any>;
@@ -986,6 +986,16 @@ transformations that could be applied. Return ONLY a JSON array of:
     });
     
     this.stats.samplesProcessed++;
+    
+    this.emit({
+      type: 'sample-added',
+      timestamp: Date.now(),
+      data: {
+        language,
+        context,
+        sampleCount: this.learningData.examples.length,
+      },
+    });
     
     // Check if we have enough samples for learning
     if (this.learningData.examples.length >= this.options.minSamplesForLearning) {

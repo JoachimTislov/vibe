@@ -116,15 +116,15 @@ export class MistralClient implements LLMClient {
     const cacheKey = this.getCacheKey(prompt, 'generate');
     
     // Check cache
-    if (this.cache && this.cache.has(cacheKey)) {
-      const cached = this.cache.get<LLMResponse>(cacheKey);
+    if (this.cache && await this.cache.has(cacheKey)) {
+      const cached = await this.cache.get<LLMResponse>(cacheKey);
       if (cached) {
         return cached;
       }
     }
 
     const request: MistralRequest = {
-      model: options?.model || this.options.model,
+      model: options?.model || this.options.model || 'mistral-large-latest',
       messages: [
         { role: 'system', content: prompt.system },
         { role: 'user', content: prompt.user },
@@ -151,7 +151,7 @@ export class MistralClient implements LLMClient {
 
       // Cache response
       if (this.cache) {
-        this.cache.set(cacheKey, result, 86400000); // 24 hour cache
+        await this.cache.set(cacheKey, result, 86400000); // 24 hour cache
       }
 
       return result;
@@ -200,7 +200,7 @@ export class MistralClient implements LLMClient {
   ): Promise<any> {
     const cacheKey = this.getCacheKey({ system: '', user: `analyze:${language}:${task}:${code.substring(0, 100)}` }, 'analyze');
     
-    if (this.cache && this.cache.has(cacheKey)) {
+    if (this.cache && await this.cache.has(cacheKey)) {
       return this.cache.get<any>(cacheKey);
     }
 
@@ -231,7 +231,7 @@ Analysis:`,
     try {
       const result = JSON.parse(response.content);
       if (this.cache) {
-        this.cache.set(cacheKey, result, 86400000);
+        await this.cache.set(cacheKey, result, 86400000);
       }
       return result;
     } catch {
@@ -257,8 +257,8 @@ Analysis:`,
     const cacheKey = `parser:${languageName}:${this.hashObject(samples)}`;
     
     // Check cache for existing parser
-    if (this.cache && this.cache.has(cacheKey)) {
-      return this.cache.get<Parser>(cacheKey)!;
+    if (this.cache && await this.cache.has(cacheKey)) {
+      return (await this.cache.get<Parser>(cacheKey))!;
     }
 
     // Generate parser using LLM
@@ -308,7 +308,7 @@ Parser configuration:`,
       
       // Cache the parser
       if (this.cache) {
-        this.cache.set(cacheKey, parser, 86400000);
+        await this.cache.set(cacheKey, parser, 86400000);
       }
       
       return parser;
@@ -319,7 +319,7 @@ Parser configuration:`,
     }
   }
 
-  private createParserFromConfig(config: any, languageName: string): Parser {
+  private createParserFromConfig(config: any, _languageName: string): Parser {
     const tokenSpecs = config.tokenSpecs || [];
     const parseRules = config.parseRules || {};
     const precedence = config.precedence || [];
@@ -453,8 +453,8 @@ Parser configuration:`,
 
   private buildASTFromTokens(
     tokens: any[],
-    parseRules: Record<string, any>,
-    precedence: any[]
+    _parseRules: Record<string, any>,
+    _precedence: any[]
   ): any {
     // Simple AST builder - would use a proper parser generator in real implementation
     const ast: any = {
@@ -525,16 +525,15 @@ Parser configuration:`,
             },
           },
           tokens: [],
-          errors: [{
+          errors: [],
+          warnings: [{
             message: `No parser available for ${languageName}. Using fallback.`,
             position: { line: 0, column: 0, offset: 0 },
-            severity: 'warning',
             code: 'FALLBACK_PARSER',
           }],
-          warnings: [],
         };
       },
-      tokenize: (source: string) => [],
+      tokenize: (_source: string) => [],
       canParse: () => true,
     };
   }
@@ -549,8 +548,8 @@ Parser configuration:`,
   ): Promise<Transform> {
     const cacheKey = `transform:${this.hashObject({ description, examples })}`;
     
-    if (this.cache && this.cache.has(cacheKey)) {
-      return this.cache.get<Transform>(cacheKey)!;
+    if (this.cache && await this.cache.has(cacheKey)) {
+      return (await this.cache.get<Transform>(cacheKey))!;
     }
 
     const prompt: LLMPrompt = {
@@ -590,7 +589,7 @@ Transform configuration:`,
       const transform = this.createTransformFromConfig(config);
       
       if (this.cache) {
-        this.cache.set(cacheKey, transform, 86400000);
+        await this.cache.set(cacheKey, transform, 86400000);
       }
       
       return transform;
@@ -612,10 +611,10 @@ Transform configuration:`,
     };
   }
 
-  private createVisitorFunction(code: string): (node: ASTNode, context: any) => ASTNode | null {
+  private createVisitorFunction(_code: string): (node: ASTNode, context: any) => ASTNode | null {
     // In real implementation, would use Function constructor or eval
     // For now, return a simple visitor
-    return (node, context) => {
+    return (node, _context) => {
       console.log(`Applying dynamic transform to ${node.type}`);
       return node;
     };
@@ -632,8 +631,8 @@ Transform configuration:`,
   ): Promise<string> {
     const cacheKey = `generate:${this.hashObject({ ast, targetLanguage, sourceLanguage })}`;
     
-    if (this.cache && this.cache.has(cacheKey)) {
-      return this.cache.get<string>(cacheKey)!;
+    if (this.cache && await this.cache.has(cacheKey)) {
+      return (await this.cache.get<string>(cacheKey))!;
     }
 
     const prompt: LLMPrompt = {
@@ -661,7 +660,7 @@ Generated code:`,
     const response = await this.generate(prompt);
     
     if (this.cache) {
-      this.cache.set(cacheKey, response.content, 86400000);
+      await this.cache.set(cacheKey, response.content, 86400000);
     }
     
     return response.content;

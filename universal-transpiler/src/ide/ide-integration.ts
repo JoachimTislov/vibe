@@ -12,12 +12,13 @@
 
 import type { 
   ASTNode,
-  Parser,
   TranspileOptions,
   TranspileResult,
   LLMClient,
   CacheManager,
 } from '../core/universal-transpiler';
+
+import { createHash } from 'crypto';
 
 // ============================================================================
 // Language Server Protocol (LSP) Types
@@ -311,20 +312,27 @@ export type SemanticTokenModifier =
  * 
  * Provides language features for any language supported by the transpiler
  */
+/**
+ * Minimal structural type for a WebSocket connection.
+ * The 'ws' module is an optional peer dependency loaded at runtime.
+ */
+interface WsSocket {
+  send(data: string): void;
+  close(): void;
+  on(event: string, listener: (...args: any[]) => void): void;
+}
+
 export class UniversalTranspilerLSPServer {
   private transpiler: any;
   private llm: LLMClient | null = null;
-  private cache: CacheManager | null = null;
   private documents: Map<string, TextDocumentItem> = new Map();
-  private nextRequestId = 1;
   private pendingRequests: Map<number, (result: any) => void> = new Map();
-  private socket: WebSocket | null = null;
+  private socket: WsSocket | null = null;
   private running = false;
 
-  constructor(transpiler: any, llm?: LLMClient, cache?: CacheManager) {
+  constructor(transpiler: any, llm?: LLMClient, _cache?: CacheManager) {
     this.transpiler = transpiler;
     this.llm = llm || null;
-    this.cache = cache || null;
   }
 
   /**
@@ -335,10 +343,11 @@ export class UniversalTranspilerLSPServer {
     
     // Try to use WebSocket server
     try {
-      const WebSocketServer = (await import('ws')).WebSocketServer;
+      // 'ws' is an optional peer dependency, loaded lazily at runtime
+      const WebSocketServer = require('ws').WebSocketServer;
       const wss = new WebSocketServer({ port });
       
-      wss.on('connection', (ws: WebSocket) => {
+      wss.on('connection', (ws: WsSocket) => {
         this.socket = ws;
         this.setupSocket(ws);
       });
@@ -395,7 +404,7 @@ export class UniversalTranspilerLSPServer {
   /**
    * Setup WebSocket connection
    */
-  private setupSocket(ws: WebSocket): void {
+  private setupSocket(ws: WsSocket): void {
     ws.on('message', (data: any) => {
       try {
         const message = JSON.parse(data.toString()) as LSPRequest | LSPNotification;
@@ -528,7 +537,7 @@ export class UniversalTranspilerLSPServer {
   /**
    * Process LSP notification
    */
-  private processNotification(method: LSPMessageType, params: any): void {
+  private processNotification(method: LSPMessageType, _params: any): void {
     switch (method) {
       case 'initialized':
         this.handleInitialized();
@@ -563,7 +572,7 @@ export class UniversalTranspilerLSPServer {
   /**
    * Handle initialize request
    */
-  private async handleInitialize(params: any): Promise<any> {
+  private async handleInitialize(_params: any): Promise<any> {
     return {
       capabilities: {
         textDocumentSync: {
@@ -686,13 +695,12 @@ export class UniversalTranspilerLSPServer {
     
     const text = document.text;
     const offset = this.offsetAtPosition(text, position);
-    const line = this.getLine(text, position.line);
     
     // Get completions based on context
     const context = this.getCompletionContext(text, offset, position);
     
     // Try to get completions from transpiler
-    if (this.llm) {
+    if (this.llm && this.llm.suggestSyntax) {
       try {
         const completions = await this.llm.suggestSyntax(
           context.prefix,
@@ -719,7 +727,7 @@ export class UniversalTranspilerLSPServer {
   /**
    * Get completion context
    */
-  private getCompletionContext(text: string, offset: number, position: Position): {
+  private getCompletionContext(text: string, _offset: number, position: Position): {
     prefix: string;
     suffix: string;
     line: string;
@@ -790,7 +798,7 @@ export class UniversalTranspilerLSPServer {
   /**
    * Get snippets for a language and context
    */
-  private getLanguageSnippets(language: string, context: string): Array<{
+  private getLanguageSnippets(_language: string, context: string): Array<{
     label: string;
     description: string;
     body: string;
@@ -881,16 +889,11 @@ export class UniversalTranspilerLSPServer {
    */
   private async handleDefinition(params: any): Promise<Definition> {
     const uri = params.textDocument.uri;
-    const position = params.position;
     const document = this.documents.get(uri);
     
     if (!document) {
       return null;
     }
-    
-    const text = document.text;
-    const offset = this.offsetAtPosition(text, position);
-    const word = this.getWordAtPosition(text, offset);
     
     // Try to find definition
     // This would parse the document and find the symbol definition
@@ -903,7 +906,6 @@ export class UniversalTranspilerLSPServer {
    */
   private async handleReferences(params: any): Promise<Location[]> {
     const uri = params.textDocument.uri;
-    const position = params.position;
     const document = this.documents.get(uri);
     
     if (!document) {
@@ -943,7 +945,7 @@ export class UniversalTranspilerLSPServer {
   /**
    * Extract symbols from AST
    */
-  private extractSymbolsFromAST(ast: ASTNode, text: string): DocumentSymbol[] {
+  private extractSymbolsFromAST(ast: ASTNode, _text: string): DocumentSymbol[] {
     const symbols: DocumentSymbol[] = [];
     
     const visit = (node: ASTNode, parent?: DocumentSymbol) => {
@@ -981,7 +983,7 @@ export class UniversalTranspilerLSPServer {
         };
         
         if (parent) {
-          parent.children.push(symbol);
+          (parent.children ??= []).push(symbol);
         } else {
           symbols.push(symbol);
         }
@@ -1012,7 +1014,6 @@ export class UniversalTranspilerLSPServer {
    */
   private async handleFormatting(params: any): Promise<TextEdit[]> {
     const uri = params.textDocument.uri;
-    const options = params.options as FormattingOptions;
     const document = this.documents.get(uri);
     
     if (!document) {
@@ -1080,7 +1081,7 @@ export class UniversalTranspilerLSPServer {
   /**
    * Get semantic token type
    */
-  private getSemanticTokenType(tokenType: string, language: string): number {
+  private getSemanticTokenType(tokenType: string, _language: string): number {
     const tokenTypes: Record<string, number> = {
       'keyword': 1,
       'operator': 2,
@@ -1100,14 +1101,14 @@ export class UniversalTranspilerLSPServer {
   /**
    * Get semantic token modifiers
    */
-  private getSemanticTokenModifiers(tokenType: string, language: string): number {
+  private getSemanticTokenModifiers(_tokenType: string, _language: string): number {
     return 0; // No modifiers for now
   }
 
   /**
    * Handle workspace symbol request
    */
-  private async handleWorkspaceSymbol(params: any): Promise<DocumentSymbol[]> {
+  private async handleWorkspaceSymbol(_params: any): Promise<DocumentSymbol[]> {
     const symbols: DocumentSymbol[] = [];
     
     for (const document of this.documents.values()) {
@@ -1174,7 +1175,7 @@ export class UniversalTranspilerLSPServer {
   private async analyzeDocument(document: TextDocumentItem): Promise<void> {
     // Parse document
     try {
-      const result = await this.transpiler.transpile(document.text, {
+      await this.transpiler.transpile(document.text, {
         sourceType: document.languageId,
         target: document.languageId,
       });
@@ -1206,7 +1207,7 @@ export class UniversalTranspilerLSPServer {
    */
   private detectLanguageFromText(text: string): string {
     // Use transpiler's language detection
-    return this.transpiler.detectLanguage(text).then((langs) => langs[0] || 'javascript');
+    return this.transpiler.detectLanguage(text).then((langs: string[]) => langs[0] || 'javascript');
   }
 
   /**
@@ -1236,10 +1237,21 @@ export class UniversalTranspilerLSPServer {
    * Get word at position
    */
   private getWordAtPosition(text: string, offset: number): string {
-    const start = text.lastIndexOf(/\w/, offset);
-    const end = text.indexOf(/\W/, offset);
+    if (offset < 0 || offset >= text.length) {
+      return '';
+    }
     
-    return text.substring(start, end === -1 ? text.length : end);
+    let start = offset;
+    while (start > 0 && /\w/.test(text[start - 1])) {
+      start--;
+    }
+    
+    let end = offset;
+    while (end < text.length && /\w/.test(text[end])) {
+      end++;
+    }
+    
+    return text.substring(start, end);
   }
 
   /**
@@ -1333,6 +1345,62 @@ export class UniversalTranspilerLSPServer {
  *   }
  * }
  */
+/**
+ * Minimal structural description of the 'vscode' extension API surface used
+ * below. The real 'vscode' module exists only inside an extension host, so it
+ * is loaded lazily with require() when the extension methods are invoked.
+ */
+interface VscodeApi {
+  commands: {
+    registerCommand(id: string, handler: (...args: any[]) => any): unknown;
+  };
+  languages: {
+    registerCompletionItemProvider(
+      selector: string,
+      provider: any,
+      ...triggerCharacters: string[]
+    ): unknown;
+    registerHoverProvider(selector: string, provider: any): unknown;
+    registerDocumentSymbolProvider(selector: string, provider: any, options?: any): unknown;
+    registerDocumentFormattingEditProvider(selector: string, provider: any): unknown;
+  };
+  window: {
+    activeTextEditor: any;
+    showErrorMessage(message: string): unknown;
+    showInformationMessage(message: string): unknown;
+    showQuickPick(items: any[], options?: any): Promise<any>;
+    showTextDocument(document: any): Promise<any>;
+  };
+  workspace: {
+    openTextDocument(options: any): Promise<any>;
+  };
+  SymbolKind: {
+    Function: number;
+    Class: number;
+    Variable: number;
+    Interface: number;
+  };
+  CompletionItem: new (label: string) => { sortText?: string };
+  Hover: new (contents: any) => unknown;
+  Position: new (line: number, character: number) => unknown;
+  Range: {
+    new (start: any, end: any): any;
+    new (startLine: number, startCharacter: number, endLine: number, endCharacter: number): any;
+  };
+  DocumentSymbol: new (
+    name: string,
+    detail: string,
+    kind: number,
+    range: any,
+    selectionRange: any
+  ) => { children: any[] };
+  TextEdit: new (range: any, newText: string) => unknown;
+}
+
+function getVscode(): VscodeApi {
+  return require('vscode');
+}
+
 export class VSCodeExtension {
   private transpiler: any;
   private llm: LLMClient | null = null;
@@ -1346,6 +1414,7 @@ export class VSCodeExtension {
    * Register extension commands
    */
   registerCommands(context: any): void {
+    const vscode = getVscode();
     // Register transpile command
     const transpileCommand = this.createTranspileCommand();
     context.subscriptions.push(
@@ -1395,6 +1464,7 @@ export class VSCodeExtension {
    * Create transpile command handler
    */
   private createTranspileCommand(): () => Promise<void> {
+    const vscode = getVscode();
     return async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
@@ -1422,7 +1492,7 @@ export class VSCodeExtension {
 
         if (result.errors.length > 0) {
           vscode.window.showErrorMessage(
-            `Transpilation errors: ${result.errors.map(e => e.message).join('; ')}`
+            `Transpilation errors: ${result.errors.map((e: any) => e.message).join('; ')}`
           );
           return;
         }
@@ -1444,6 +1514,7 @@ export class VSCodeExtension {
    * Create detect language command handler
    */
   private createDetectLanguageCommand(): () => Promise<void> {
+    const vscode = getVscode();
     return async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
@@ -1481,14 +1552,14 @@ export class VSCodeExtension {
    * Create completion provider
    */
   private createCompletionProvider(): any {
+    const vscode = getVscode();
     return {
       provideCompletionItems: async (document: any, position: any) => {
-        const text = document.getText();
         const line = document.lineAt(position.line).text;
         const prefix = line.substring(0, position.character);
         
         try {
-          if (this.llm) {
+          if (this.llm && this.llm.suggestSyntax) {
             const completions = await this.llm.suggestSyntax(
               prefix,
               document.languageId,
@@ -1514,6 +1585,7 @@ export class VSCodeExtension {
    * Create hover provider
    */
   private createHoverProvider(): any {
+    const vscode = getVscode();
     return {
       provideHover: async (document: any, position: any) => {
         const wordRange = document.getWordRangeAtPosition(position);
@@ -1560,6 +1632,7 @@ export class VSCodeExtension {
    * Create formatting provider
    */
   private createFormattingProvider(): any {
+    const vscode = getVscode();
     return {
       provideDocumentFormattingEdits: async (document: any) => {
         const text = document.getText();
@@ -1595,6 +1668,7 @@ export class VSCodeExtension {
    * Convert AST to VS Code symbols
    */
   private convertToVSCodeSymbols(ast: ASTNode): any[] {
+    const vscode = getVscode();
     const symbols: any[] = [];
     
     const visit = (node: ASTNode, parent: any = null) => {
@@ -1650,7 +1724,8 @@ export class VSCodeExtension {
   /**
    * Convert AST range to VS Code range
    */
-  private vscodeRangeFromAST(location: any): vscode.Range {
+  private vscodeRangeFromAST(location: any): any {
+    const vscode = getVscode();
     if (location?.start && location?.end) {
       return new vscode.Range(
         new vscode.Position(location.start.line - 1, location.start.column),
@@ -1672,10 +1747,8 @@ export class VSCodeExtension {
  * Uses the IntelliJ Platform Plugin API
  */
 export class JetBrainsIntegration {
-  private transpiler: any;
-
-  constructor(transpiler: any) {
-    this.transpiler = transpiler;
+  constructor(_transpiler: any) {
+    // Kept for API symmetry; the IntelliJ Platform plugin code is sketched below
   }
 
   /**
@@ -1752,11 +1825,9 @@ export class JetBrainsIntegration {
  */
 export class EditorTooling {
   private transpiler: any;
-  private llm: LLMClient | null = null;
 
-  constructor(transpiler: any, llm?: LLMClient) {
+  constructor(transpiler: any, _llm?: LLMClient) {
     this.transpiler = transpiler;
-    this.llm = llm || null;
   }
 
   /**
@@ -1797,14 +1868,11 @@ export class EditorTooling {
   /**
    * Code folding configuration
    */
-  getCodeFoldingRules(language: string): any {
+  getCodeFoldingRules(_language: string): any {
+    // Note: object literals cannot hold duplicate keys; the later pairs below
+    // used to silently override the earlier ones at runtime, so only the final
+    // pair is kept here.
     return {
-      // Fold blocks
-      start: /\{|\$/,
-      end: /\}|^\s*\}/,
-      // Fold comments
-      start: /\/\*/,
-      end: /\*\//,
       // Fold functions
       start: /function\s+\w+\s*\([^)]*\)\s*\{|def\s+\w+\s*\([^)]*\)\s*:/,
       end: /^\s*\}|^\s*$/,
@@ -1814,7 +1882,7 @@ export class EditorTooling {
   /**
    * Auto-indentation rules
    */
-  getAutoIndentationRules(language: string): any {
+  getAutoIndentationRules(_language: string): any {
     return {
       increaseIndent: /\{|\:|\->/,
       decreaseIndent: /\}|^\s*$/,
@@ -1827,7 +1895,7 @@ export class EditorTooling {
   /**
    * Code lens providers
    */
-  getCodeLensProviders(language: string): any {
+  getCodeLensProviders(_language: string): any {
     return {
       // Show transpile options
       transpile: {
@@ -1847,7 +1915,7 @@ export class EditorTooling {
   /**
    * Snippets
    */
-  getSnippets(language: string): Record<string, any> {
+  getSnippets(_language: string): Record<string, any> {
     return {
       'Function': {
         prefix: 'fn',
@@ -1908,7 +1976,7 @@ export class EditorTooling {
   /**
    * Refactoring actions
    */
-  getRefactoringActions(language: string): any {
+  getRefactoringActions(_language: string): any {
     return {
       // Rename symbol
       rename: {
@@ -1954,13 +2022,13 @@ export class SelfOptimizingSystem {
     this.cache = cache || null;
     
     // Load stored optimizations
-    this.loadOptimizations();
+    void this.loadOptimizations();
   }
 
   /**
    * Record transpilation statistics
    */
-  recordTranspilation(source: string, options: TranspileOptions, result: TranspileResult): void {
+  recordTranspilation(_source: string, options: TranspileOptions, result: TranspileResult): void {
     const key = `${options.sourceType || 'unknown'}:${options.target || 'javascript'}`;
     
     const stats = this.statistics.get(key) || {
@@ -1997,7 +2065,7 @@ export class SelfOptimizingSystem {
   private applyDynamicOptimizations(
     key: string,
     stats: any,
-    result: TranspileResult
+    _result: TranspileResult
   ): void {
     // If error rate is high, try to improve
     if (stats.errorCount > stats.count * 0.3) {
@@ -2066,7 +2134,7 @@ export class SelfOptimizingSystem {
   /**
    * Get common errors for a language pair
    */
-  private getCommonErrors(key: string): string[] {
+  private getCommonErrors(_key: string): string[] {
     // This would track errors from transpilation results
     // For now, return empty array
     return [];
@@ -2075,7 +2143,7 @@ export class SelfOptimizingSystem {
   /**
    * Apply stored optimizations
    */
-  applyOptimizations(source: string, options: TranspileOptions): TranspileOptions {
+  applyOptimizations(_source: string, options: TranspileOptions): TranspileOptions {
     const key = `${options.sourceType || 'unknown'}:${options.target || 'javascript'}`;
     
     // Apply error optimizations
@@ -2242,24 +2310,24 @@ export class SelfOptimizingSystem {
   /**
    * Save optimizations to persistent storage
    */
-  private saveOptimizations(): void {
+  private async saveOptimizations(): Promise<void> {
     if (this.cache) {
-      this.cache.set('self-optimizing:optimizations', Array.from(this.optimizations.entries()));
-      this.cache.set('self-optimizing:statistics', Array.from(this.statistics.entries()));
+      await this.cache.set('self-optimizing:optimizations', Array.from(this.optimizations.entries()));
+      await this.cache.set('self-optimizing:statistics', Array.from(this.statistics.entries()));
     }
   }
 
   /**
    * Load optimizations from persistent storage
    */
-  private loadOptimizations(): void {
+  private async loadOptimizations(): Promise<void> {
     if (this.cache) {
-      const optimizations = this.cache.get<[string, any][]>('self-optimizing:optimizations');
+      const optimizations = await this.cache.get<[string, any][]>('self-optimizing:optimizations');
       if (optimizations) {
         this.optimizations = new Map(optimizations);
       }
       
-      const statistics = this.cache.get<[string, any][]>('self-optimizing:statistics');
+      const statistics = await this.cache.get<[string, any][]>('self-optimizing:statistics');
       if (statistics) {
         this.statistics = new Map(statistics);
       }
@@ -2270,7 +2338,7 @@ export class SelfOptimizingSystem {
    * Hash source for cache key
    */
   private hashSource(source: string): string {
-    return crypto.createHash('sha256').update(source).digest('hex').substring(0, 16);
+    return createHash('sha256').update(source).digest('hex').substring(0, 16);
   }
 
   /**
@@ -2305,48 +2373,6 @@ export class SelfOptimizingSystem {
 // ============================================================================
 // Exports
 // ============================================================================
-
-export {
-  UniversalTranspilerLSPServer,
-  VSCodeExtension,
-  JetBrainsIntegration,
-  EditorTooling,
-  SelfOptimizingSystem,
-};
-
-export type {
-  Position,
-  Range,
-  TextDocumentIdentifier,
-  TextDocumentItem,
-  VersionedTextDocumentIdentifier,
-  TextDocumentContentChangeEvent,
-  DidChangeTextDocumentParams,
-  CompletionItem,
-  CompletionItemKind,
-  InsertTextFormat,
-  TextEdit,
-  MarkupContent,
-  Command,
-  Hover,
-  Location,
-  Definition,
-  ReferenceContext,
-  ReferenceParams,
-  DocumentSymbol,
-  SymbolKind,
-  FormattingOptions,
-  Diagnostic,
-  DiagnosticSeverity,
-  DiagnosticRelatedInformation,
-  DiagnosticTag,
-  SemanticTokenType,
-  SemanticTokenModifier,
-  LSPRequest,
-  LSPResponse,
-  LSPNotification,
-  LSPMessageType,
-};
 
 export default {
   UniversalTranspilerLSPServer,

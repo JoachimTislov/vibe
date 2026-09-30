@@ -10,7 +10,7 @@ import type {
   Token,
   Position,
 } from '../core/universal-transpiler';
-import type { LLMClient, CacheManager } from '../llm/mistral-client';
+import type { LLMClient, CacheManager } from '../core/universal-transpiler';
 
 // ============================================================================
 // Types
@@ -78,7 +78,7 @@ export interface CodeUnderstanding {
 export interface TypeInference {
   type: string;
   literal?: any;
-  inferredFrom: string;
+  inferredFrom?: string;
   possibleTypes?: string[];
   confidence: number;
   source?: string;
@@ -438,7 +438,6 @@ export interface UnderstandingStats {
 
 export class AutonomousCodeUnderstanding {
   private llm?: LLMClient;
-  private cache?: CacheManager;
   private understandingCache: Map<string, CodeUnderstanding> = new Map();
   private options: {
     enableCaching: boolean;
@@ -448,9 +447,8 @@ export class AutonomousCodeUnderstanding {
     debug: boolean;
   };
 
-  constructor(llm?: LLMClient, cache?: CacheManager, options?: Partial<AutonomousCodeUnderstanding['options']>) {
+  constructor(llm?: LLMClient, _cache?: CacheManager, options?: Partial<AutonomousCodeUnderstanding['options']>) {
     this.llm = llm;
-    this.cache = cache;
     this.options = {
       enableCaching: true,
       enableLearning: true,
@@ -462,7 +460,8 @@ export class AutonomousCodeUnderstanding {
   }
 
   async understand(source: string, options: CodeUnderstandingOptions = {}): Promise<CodeUnderstandingResult> {
-    const startTime = Date.now();
+    // Sub-millisecond resolution so fast operations still report meaningful times
+    const startTime = performance.now();
     const cacheKey = this.generateCacheKey(source, options);
 
     if (this.options.enableCaching && this.understandingCache.has(cacheKey)) {
@@ -573,7 +572,7 @@ export class AutonomousCodeUnderstanding {
       this.enforceCacheLimit();
     }
 
-    const analysisTime = Date.now() - startTime;
+    const analysisTime = performance.now() - startTime;
 
     return {
       understanding,
@@ -609,7 +608,7 @@ export class AutonomousCodeUnderstanding {
     }
   }
 
-  private async analyzeSemantics(source: string, ast: ASTNode, tokens: Token[], options: CodeUnderstandingOptions): Promise<{ semantics: CodeUnderstanding['semantics']; llmCalls: number; nodesVisited: number }> {
+  private async analyzeSemantics(source: string, ast: ASTNode, _tokens: Token[], options: CodeUnderstandingOptions): Promise<{ semantics: CodeUnderstanding['semantics']; llmCalls: number; nodesVisited: number }> {
     const semantics: CodeUnderstanding['semantics'] = { types: {}, variables: {}, functions: {}, classes: {}, imports: [], exports: [], dependencies: [] };
     let llmCalls = 0;
     let nodesVisited = 0;
@@ -697,7 +696,7 @@ export class AutonomousCodeUnderstanding {
     return { context, llmCalls };
   }
 
-  private extractSemanticsFromAST(ast: ASTNode, semantics: CodeUnderstanding['semantics']): number {
+  private extractSemanticsFromAST(ast: ASTNode, semantics: NonNullable<CodeUnderstanding['semantics']>): number {
     let count = 0;
     const visit = (node: ASTNode) => {
       count++;
@@ -711,10 +710,10 @@ export class AutonomousCodeUnderstanding {
     return count;
   }
 
-  private extractImport(node: ASTNode, semantics: CodeUnderstanding['semantics']): void {
+  private extractImport(node: ASTNode, semantics: NonNullable<CodeUnderstanding['semantics']>): void {
     const source = String(node.value?.source || '');
     const imports: ImportSpecifierInfo[] = (node.children || []).map(c => ({
-      kind: String(c.value?.kind || 'named'),
+      kind: String(c.value?.kind || 'named') as ImportSpecifierInfo['kind'],
       name: String(c.value?.name || ''),
       as: c.value?.as ? String(c.value.as) : undefined,
       source,
@@ -725,12 +724,12 @@ export class AutonomousCodeUnderstanding {
     }
   }
 
-  private extractVariable(node: ASTNode, semantics: CodeUnderstanding['semantics']): void {
+  private extractVariable(node: ASTNode, semantics: NonNullable<CodeUnderstanding['semantics']>): void {
     const name = String(node.value?.name || node.children?.[0]?.value || '');
     semantics.variables[name] = {
       name,
       type: { type: 'unknown', confidence: 0.3 },
-      kind: String(node.value?.kind || 'let'),
+      kind: String(node.value?.kind || 'let') as VariableInfo['kind'],
       scope: '',
       declaration: node.position,
       usages: [],
@@ -739,7 +738,7 @@ export class AutonomousCodeUnderstanding {
     };
   }
 
-  private extractFunction(node: ASTNode, semantics: CodeUnderstanding['semantics']): void {
+  private extractFunction(node: ASTNode, semantics: NonNullable<CodeUnderstanding['semantics']>): void {
     const name = String(node.value?.name || node.children?.[0]?.value || '');
     semantics.functions[name] = {
       name,
@@ -756,11 +755,11 @@ export class AutonomousCodeUnderstanding {
     };
   }
 
-  private extractClass(node: ASTNode, semantics: CodeUnderstanding['semantics']): void {
+  private extractClass(node: ASTNode, semantics: NonNullable<CodeUnderstanding['semantics']>): void {
     const name = String(node.value?.name || node.children?.[0]?.value || '');
     semantics.classes[name] = {
       name,
-      kind: String(node.value?.kind || 'class'),
+      kind: String(node.value?.kind || 'class') as ClassInfo['kind'],
       extends: [],
       implements: [],
       members: [],
@@ -771,17 +770,17 @@ export class AutonomousCodeUnderstanding {
     };
   }
 
-  private extractDocumentation(ast: ASTNode, context: CodeUnderstanding['context']): void {
+  private extractDocumentation(ast: ASTNode, context: NonNullable<CodeUnderstanding['context']>): void {
     const visit = (node: ASTNode) => {
       if (node.type === 'Comment') {
-        context.documentation.comments.push({ kind: String(node.value?.kind || 'line'), text: String(node.value?.text || ''), position: node.position });
+        context.documentation.comments.push({ kind: String(node.value?.kind || 'line') as 'line' | 'block' | 'jsdoc', text: String(node.value?.text || ''), position: node.position });
       }
       for (const child of node.children || []) visit(child);
     };
     visit(ast);
   }
 
-  private analyzeUsagePatterns(ast: ASTNode, context: CodeUnderstanding['context']): void {
+  private analyzeUsagePatterns(ast: ASTNode, context: NonNullable<CodeUnderstanding['context']>): void {
     const usage: Record<string, { count: number; positions: Position[] }> = {};
     const visit = (node: ASTNode) => {
       if (node.type === 'CallExpression') {
@@ -798,13 +797,13 @@ export class AutonomousCodeUnderstanding {
     }
   }
 
-  private inferTypes(semantics: CodeUnderstanding['semantics']): void {
-    for (const [name, varInfo] of Object.entries(semantics.variables)) {
+  private inferTypes(semantics: NonNullable<CodeUnderstanding['semantics']>): void {
+    for (const [_name, varInfo] of Object.entries(semantics.variables)) {
       if (varInfo.type.type === 'unknown' && varInfo.initialValue !== undefined) {
         varInfo.type = this.inferTypeFromValue(varInfo.initialValue);
       }
     }
-    for (const [name, funcInfo] of Object.entries(semantics.functions)) {
+    for (const [_name, funcInfo] of Object.entries(semantics.functions)) {
       if (funcInfo.returnType.type === 'unknown') {
         funcInfo.returnType = { type: 'any', confidence: 0.5 };
       }
@@ -898,7 +897,7 @@ export class AutonomousCodeUnderstanding {
 
   private normalizeTypes(types: any): Record<string, TypeInference> {
     const result: Record<string, TypeInference> = {};
-    for (const [k, v] of Object.entries(types || {})) {
+    for (const [k, v] of Object.entries(types || {}) as Array<[string, any]>) {
       result[k] = { type: v.type || 'unknown', literal: v.literal, inferredFrom: v.inferredFrom || '', possibleTypes: v.possibleTypes || [], confidence: v.confidence || 0.5, source: v.source };
     }
     return result;
@@ -906,7 +905,7 @@ export class AutonomousCodeUnderstanding {
 
   private normalizeVariables(vars: any): Record<string, VariableInfo> {
     const result: Record<string, VariableInfo> = {};
-    for (const [k, v] of Object.entries(vars || {})) {
+    for (const [k, v] of Object.entries(vars || {}) as Array<[string, any]>) {
       result[k] = {
         name: k,
         type: this.normalizeTypeInference(v.type || {}),
@@ -928,7 +927,7 @@ export class AutonomousCodeUnderstanding {
 
   private normalizeFunctions(funcs: any): Record<string, FunctionInfo> {
     const result: Record<string, FunctionInfo> = {};
-    for (const [k, v] of Object.entries(funcs || {})) {
+    for (const [k, v] of Object.entries(funcs || {}) as Array<[string, any]>) {
       result[k] = {
         name: k,
         kind: v.kind || 'function',
@@ -952,7 +951,7 @@ export class AutonomousCodeUnderstanding {
 
   private normalizeClasses(classes: any): Record<string, ClassInfo> {
     const result: Record<string, ClassInfo> = {};
-    for (const [k, v] of Object.entries(classes || {})) {
+    for (const [k, v] of Object.entries(classes || {}) as Array<[string, any]>) {
       result[k] = {
         name: k,
         kind: v.kind || 'class',
@@ -1120,11 +1119,11 @@ export class AutonomousCodeUnderstanding {
     for (const token of tokens) {
       if (['{', '(', '['].includes(String(token.value))) {
         const block: ASTNode = { type: 'Block', value: token.value, tokens: [token], position: token.position, location: token.location, children: [] };
-        current.children.push(block); stack.push(block); current = block;
+        (current.children ??= []).push(block); stack.push(block); current = block;
       } else if (['}', ')', ']'].includes(String(token.value))) {
         if (stack.length > 1) { stack.pop(); current = stack[stack.length - 1]; }
       } else {
-        current.children.push({ type: this.getNodeTypeFromToken(token), value: token.value, tokens: [token], position: token.position, location: token.location, children: [] });
+        (current.children ??= []).push({ type: this.getNodeTypeFromToken(token), value: token.value, tokens: [token], position: token.position, location: token.location, children: [] });
       }
     }
     return root;

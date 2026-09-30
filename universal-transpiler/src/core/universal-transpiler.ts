@@ -77,6 +77,8 @@ export interface TranspileResult {
   code: string;
   ast: ASTNode;
   map?: any; // Source map
+  /** Peer that produced this result in distributed mode. */
+  peer?: string;
   errors: TranspileError[];
   warnings: string[];
   stats: TranspileStats;
@@ -98,6 +100,11 @@ export interface TranspileStats {
   cached?: boolean;
   dynamicallyGenerated?: boolean;
   llmCalls?: number;
+  totalTime?: number;
+  /** Set when the result was produced by a remote peer. */
+  distributed?: boolean;
+  /** Id of the peer that produced this result. */
+  peer?: string;
 }
 
 export interface LanguageDefinition {
@@ -156,13 +163,16 @@ export interface TransformContext {
 // ============================================================================
 
 export interface LLMOptions {
-  provider: 'mistral' | 'openai' | 'anthropic' | 'local';
-  model: string;
+  provider?: 'mistral' | 'openai' | 'anthropic' | 'local' | 'ollama' | 'lmstudio' | 'openai-compatible' | 'custom';
+  model?: string;
   apiKey?: string;
   endpoint?: string;
   temperature?: number;
   maxTokens?: number;
   timeout?: number;
+  topP?: number;
+  topK?: number;
+  stop?: string[];
 }
 
 export interface LLMPrompt {
@@ -186,6 +196,8 @@ export interface LLMClient {
   analyzeCode: (code: string, language: string, task: string) => Promise<any>;
   generateParser: (samples: string[], languageName: string) => Promise<Parser>;
   generateTransform: (description: string, examples: any[]) => Promise<Transform>;
+  /** Optional capability: suggest syntax completions for a prefix. */
+  suggestSyntax?: (prefix: string, language: string, context: string) => Promise<string[]>;
 }
 
 // ============================================================================
@@ -205,15 +217,24 @@ export interface CacheEntry {
   };
 }
 
+export interface CacheStats {
+  size: number;
+  keys: string[];
+  oldest: CacheEntry | null;
+  newest: CacheEntry | null;
+}
+
 export interface CacheManager {
-  get: <T>(key: string) => T | null;
-  set: (key: string, value: any, ttl?: number, metadata?: any) => void;
-  has: (key: string) => boolean;
-  delete: (key: string) => void;
-  clear: () => void;
-  list: (pattern?: string) => CacheEntry[];
+  get: <T>(key: string) => Promise<T | null>;
+  set: (key: string, value: any, ttl?: number, metadata?: any) => Promise<void>;
+  has: (key: string) => Promise<boolean>;
+  delete: (key: string) => Promise<void>;
+  clear: () => Promise<void>;
+  list: (pattern?: string) => Promise<CacheEntry[]>;
   save: () => Promise<void>;
   load: () => Promise<void>;
+  invalidate: (pattern: string) => Promise<void>;
+  getStats: () => Promise<CacheStats>;
 }
 
 // ============================================================================
@@ -223,6 +244,8 @@ export interface CacheManager {
 export interface DomainDefinition {
   name: string;
   description: string;
+  /** Alternative names this domain answers to. */
+  aliases?: string[];
   keywords: string[];
   operators: string[];
   types: Record<string, any>;
@@ -336,9 +359,9 @@ export class UniversalTranspiler {
   private createDefaultCache(): CacheManager {
     // Simple in-memory cache for now
     const store = new Map<string, CacheEntry>();
-    
+
     return {
-      get: <T>(key: string) => {
+      get: async <T>(key: string) => {
         const entry = store.get(key);
         if (!entry) return null;
         if (entry.ttl > 0 && Date.now() - entry.timestamp > entry.ttl) {
@@ -347,7 +370,7 @@ export class UniversalTranspiler {
         }
         return entry.value as T;
       },
-      set: (key: string, value: any, ttl = 86400000, metadata = {}) => {
+      set: async (key: string, value: any, ttl = 86400000, metadata = {}) => {
         store.set(key, {
           key,
           value,
@@ -362,10 +385,14 @@ export class UniversalTranspiler {
           },
         });
       },
-      has: (key: string) => store.has(key),
-      delete: (key: string) => store.delete(key),
-      clear: () => store.clear(),
-      list: (pattern?: string) => {
+      has: async (key: string) => store.has(key),
+      delete: async (key: string) => {
+        store.delete(key);
+      },
+      clear: async () => {
+        store.clear();
+      },
+      list: async (pattern?: string) => {
         const entries = Array.from(store.values());
         if (!pattern) return entries;
         const regex = new RegExp(pattern);
@@ -373,6 +400,25 @@ export class UniversalTranspiler {
       },
       save: async () => {},
       load: async () => {},
+      invalidate: async (pattern: string) => {
+        const regex = new RegExp(pattern);
+        for (const key of Array.from(store.keys())) {
+          if (regex.test(key)) {
+            store.delete(key);
+          }
+        }
+      },
+      getStats: async () => {
+        const entries = Array.from(store.values());
+        return {
+          size: entries.length,
+          keys: entries.map(e => e.key),
+          oldest: entries.length > 0 ? entries.reduce((a, b) =>
+            a.timestamp < b.timestamp ? a : b) : null,
+          newest: entries.length > 0 ? entries.reduce((a, b) =>
+            a.timestamp > b.timestamp ? a : b) : null,
+        };
+      },
     };
   }
 
@@ -395,7 +441,7 @@ export class UniversalTranspiler {
         console.log(`Generating parser for ${languageName} with ${samples.length} samples`);
         return this.createDynamicParser(languageName);
       },
-      generateTransform: async (description: string, examples: any[]) => {
+      generateTransform: async (description: string, _examples: any[]) => {
         console.log(`Generating transform: ${description}`);
         return this.createDynamicTransform(description);
       },
@@ -477,8 +523,8 @@ export class UniversalTranspiler {
     
     // Check cache
     const cacheKey = this.generateCacheKey(source, options);
-    if (this.options.enableCaching && this.cache.has(cacheKey)) {
-      const cached = this.cache.get<TranspileResult>(cacheKey);
+    if (this.options.enableCaching && await this.cache.has(cacheKey)) {
+      const cached = await this.cache.get<TranspileResult>(cacheKey);
       if (cached) {
         return {
           ...cached,
@@ -550,6 +596,22 @@ export class UniversalTranspiler {
       
       if (compiler) {
         result = compiler.compile(transformedAst, options);
+      } else if (options.target === language) {
+        // Same-language transpilation with no registered compiler:
+        // the identity — the source is already valid in the target language.
+        result = {
+          code: source,
+          ast: transformedAst,
+          errors: parseResult.errors.map(e => ({ ...e, severity: 'error' as const })),
+          warnings: parseResult.warnings.map(w => w.message),
+          stats: {
+            inputSize: source.length,
+            outputSize: source.length,
+            parseTime,
+            transformTime,
+            generateTime: 0,
+          },
+        };
       } else {
         // Dynamic compilation via LLM
         result = await this.dynamicCompile(transformedAst, options, language);
@@ -575,7 +637,7 @@ export class UniversalTranspiler {
     
     // Cache result
     if (this.options.enableCaching) {
-      this.cache.set(cacheKey, result, undefined, {
+      await this.cache.set(cacheKey, result, undefined, {
         sourceHash: this.hashSource(source),
         language,
         version: '1.0.0',
@@ -699,23 +761,23 @@ export class UniversalTranspiler {
     options: TranspileOptions
   ): Promise<ParseResult> {
     const cacheKey = `parse:${this.hashSource(source)}:${language}`;
-    
+
     // Check cache for parsed AST
-    if (this.cache.has(cacheKey)) {
-      return this.cache.get<ParseResult>(cacheKey)!;
+    if (await this.cache.has(cacheKey)) {
+      return (await this.cache.get<ParseResult>(cacheKey))!;
     }
-    
+
     // Try to generate a parser dynamically
     const parser = await this.createDynamicParser(language);
     const result = parser.parse(source, options);
-    
+
     // Cache the result
-    this.cache.set(cacheKey, result);
-    
+    await this.cache.set(cacheKey, result);
+
     return result;
   }
 
-  private createDynamicParser(language: string): Parser {
+  private createDynamicParser(_language: string): Parser {
     // This creates a parser that tokenizes and builds a minimal AST
     // For more complex cases, it would call the LLM
     
@@ -842,7 +904,7 @@ export class UniversalTranspiler {
             location: token.location,
             children: [],
           };
-          current.children.push(node);
+          (current.children ??= []).push(node);
           stack.push(node);
           current = node;
         } else if (token.type === 'IDENTIFIER') {
@@ -854,7 +916,7 @@ export class UniversalTranspiler {
             location: token.location,
             children: [],
           };
-          current.children.push(node);
+          (current.children ??= []).push(node);
         } else if (token.type === 'STRING' || token.type === 'NUMBER') {
           const node: ASTNode = {
             type: 'Literal',
@@ -864,7 +926,7 @@ export class UniversalTranspiler {
             location: token.location,
             children: [],
           };
-          current.children.push(node);
+          (current.children ??= []).push(node);
         } else if (token.type === 'OPERATOR') {
           const node: ASTNode = {
             type: 'Operator',
@@ -874,7 +936,7 @@ export class UniversalTranspiler {
             location: token.location,
             children: [],
           };
-          current.children.push(node);
+          (current.children ??= []).push(node);
         } else if (token.value === '{' || token.value === '(' || token.value === '[') {
           // Start of block
           const node: ASTNode = {
@@ -885,7 +947,7 @@ export class UniversalTranspiler {
             location: token.location,
             children: [],
           };
-          current.children.push(node);
+          (current.children ??= []).push(node);
           stack.push(node);
           current = node;
         } else if (token.value === '}' || token.value === ')' || token.value === ']') {
@@ -897,10 +959,41 @@ export class UniversalTranspiler {
         }
       }
       
+      // Basic delimiter balance check: a tokenizing fallback cannot do full
+      // syntax analysis, but unbalanced brackets are a genuine syntax error.
+      const closers: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
+      const openStack: { delimiter: string; token: Token }[] = [];
+      const errors: ParseError[] = [];
+      
+      for (const token of tokens) {
+        if (token.value === '(' || token.value === '[' || token.value === '{') {
+          openStack.push({ delimiter: token.value, token });
+        } else if (token.value === ')' || token.value === ']' || token.value === '}') {
+          const top = openStack.pop();
+          if (!top || top.delimiter !== closers[token.value]) {
+            errors.push({
+              message: `Unbalanced delimiter '${token.value}'`,
+              position: token.position,
+              severity: 'error',
+              code: 'UNBALANCED_DELIMITER',
+            });
+          }
+        }
+      }
+      
+      for (const unclosed of openStack) {
+        errors.push({
+          message: `Unclosed delimiter '${unclosed.delimiter}'`,
+          position: unclosed.token.position,
+          severity: 'error',
+          code: 'UNCLOSED_DELIMITER',
+        });
+      }
+      
       return {
         ast,
         tokens,
-        errors: [],
+        errors,
         warnings: tokens
           .filter(t => t.type === 'UNKNOWN')
           .map(t => ({
@@ -938,8 +1031,8 @@ export class UniversalTranspiler {
     const cacheKey = `compile:${this.hashSource(JSON.stringify(ast))}:${sourceLanguage}:${options.target}`;
     
     // Check cache
-    if (this.cache.has(cacheKey)) {
-      return this.cache.get<TranspileResult>(cacheKey)!;
+    if (await this.cache.has(cacheKey)) {
+      return (await this.cache.get<TranspileResult>(cacheKey))!;
     }
     
     // Try to use LLM to generate compilation
@@ -965,8 +1058,8 @@ export class UniversalTranspiler {
         };
         
         // Cache the result
-        this.cache.set(cacheKey, result);
-        
+        await this.cache.set(cacheKey, result);
+
         return result;
       } catch (error) {
         console.error('Dynamic compilation failed:', error);
@@ -1036,13 +1129,13 @@ Generated code:`,
     // Apply language-specific transforms
     const langDef = this.languages.get(language);
     if (langDef?.transforms) {
-      for (const [name, transform] of Object.entries(langDef.transforms)) {
+      for (const [_name, transform] of Object.entries(langDef.transforms)) {
         result = this.applyTransform(result, transform, options);
       }
     }
     
     // Apply global transforms
-    for (const [name, transform] of this.transforms) {
+    for (const [_name, transform] of this.transforms) {
       result = this.applyTransform(result, transform, options);
     }
     
@@ -1078,8 +1171,8 @@ Generated code:`,
     }
     
     // Apply domain transforms
-    for (const [name, transform] of Object.entries(domainDef.transforms || {})) {
-      result = this.applyTransform(result, transform, options);
+    for (const [_name, transform] of Object.entries(domainDef.transforms || {})) {
+      result = transform.apply(result, options);
     }
     
     return result;
@@ -1122,7 +1215,15 @@ Generated code:`,
       
       // Apply visitor
       if (transform.visitor) {
-        const visited = transform.visitor(resultNode, context);
+        let visited: ASTNode | null = null;
+        if (typeof transform.visitor === 'function') {
+          visited = transform.visitor(resultNode, context);
+        } else {
+          const handler = transform.visitor[resultNode.type];
+          if (handler) {
+            visited = handler(resultNode, context);
+          }
+        }
         if (visited !== null) {
           resultNode = visited;
         }
@@ -1222,13 +1323,13 @@ Generated code:`,
     return visit(root);
   }
 
-  private createDynamicTransform(description: string): Transform {
+  private createDynamicTransform(_description: string): Transform {
     // Generate a transform based on description
     // This would use LLM in real implementation
     
     return {
       name: `dynamic-${Date.now()}`,
-      visitor: (node, context) => {
+      visitor: (node, _context) => {
         // Placeholder implementation
         console.log(`Dynamic transform applied to ${node.type}`);
         return node;
@@ -1398,7 +1499,7 @@ Generated code:`,
         {
           name: 'react-component',
           pattern: { type: 'FunctionDeclaration', value: (n: any) => /^[A-Z]/.test(n.id?.name || '') },
-          handler: (node, context) => {
+          handler: (node, _context) => {
             // Mark as React component
             return {
               ...node,
@@ -1475,7 +1576,11 @@ Generated code:`,
     options: Partial<TranspileOptions> & { domain?: string } = {}
   ): Promise<any> {
     const language = options.sourceType || this.options.defaultLanguage;
-    const parseResult = await this.parseWithFallback(source, language, options);
+    const parseOptions: TranspileOptions = {
+      ...options,
+      target: options.target ?? language,
+    };
+    const parseResult = await this.parseWithFallback(source, language, parseOptions);
     
     if (parseResult.errors.some(e => e.severity === 'fatal')) {
       throw new Error(`Parse error: ${parseResult.errors[0].message}`);
@@ -1501,7 +1606,7 @@ Generated code:`,
   async dynamicInterpret(
     ast: ASTNode,
     language: string,
-    options: any
+    _options: any
   ): Promise<any> {
     const prompt: LLMPrompt = {
       system: `You are a code interpreter. You will be given an Abstract Syntax Tree (AST) and must execute it mentally, returning the final result.

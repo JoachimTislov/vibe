@@ -11,7 +11,7 @@
  * - Transform Generator
  */
 
-import { describe, it, expect, beforeAll, afterAll, vi } from '@jest/globals';
+import { describe, it, expect, beforeAll } from '@jest/globals';
 
 // Import the modules
 import {
@@ -163,10 +163,6 @@ describe('AI Features', () => {
     mockLLM = new MockLLMClient();
   });
 
-  afterAll(() => {
-    vi.clearAllMocks();
-  });
-
   describe('Autonomous Code Understanding', () => {
     let codeUnderstanding: AutonomousCodeUnderstanding;
 
@@ -203,7 +199,7 @@ describe('AI Features', () => {
       });
 
       expect(result.understanding.syntax).toBeDefined();
-      expect(result.understanding.syntax.tokens).toBeInstanceOf(Array);
+      expect(result.understanding.syntax?.tokens).toBeInstanceOf(Array);
     });
 
     it('should handle caching', async () => {
@@ -248,7 +244,7 @@ function complex(a, b) {
         analyzeSemantics: true,
       });
 
-      expect(result.understanding.semantics.variables).toBeDefined();
+      expect(result.understanding.semantics?.variables).toBeDefined();
     });
   });
 

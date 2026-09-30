@@ -6,3 +6,4 @@ coverage/
 .scratch/
 *.log
 .universal-transpiler/
+.universal-transpiler-cache/

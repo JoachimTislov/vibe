@@ -685,6 +685,26 @@ export class TransformGenerator {
     return generated;
   }
 
+  /**
+   * Discover a transform from a description of the input patterns it should
+   * recognize. Delegates to generateTransform and reports how confident the
+   * generator is in the discovered transform (based on validation pass rate).
+   */
+  async discoverTransform(
+    options: TransformGenerationOptions
+  ): Promise<GeneratedTransform & { confidence: number }> {
+    const generated = await this.generateTransform(options);
+    
+    const confidence = Math.max(0, Math.min(1, generated.validation.passRate));
+    
+    this.log(`Discovered transform: ${options.name} (confidence: ${confidence})`);
+    
+    return {
+      ...generated,
+      confidence,
+    };
+  }
+
   // ==========================================================================
   // Transform Analysis
   // ==========================================================================

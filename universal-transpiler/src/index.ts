@@ -177,7 +177,7 @@ export interface BabelOptions {
   configFile?: string;
 }
 
-export function createBabelParser(options?: BabelOptions): Parser | null {
+export function createBabelParser(_options?: BabelOptions): Parser | null {
   try {
     // In Node.js environment, would use:
     // const babel = require('@babel/core');
@@ -203,7 +203,7 @@ export interface TypeScriptOptions {
   jsx?: string;
 }
 
-export function createTypeScriptParser(options?: TypeScriptOptions): Parser | null {
+export function createTypeScriptParser(_options?: TypeScriptOptions): Parser | null {
   try {
     // In Node.js environment, would use:
     // const ts = require('typescript');
@@ -447,7 +447,7 @@ export function createHTMLLanguage(): LanguageDefinition {
     mimetypes: ['text/html', 'application/xhtml+xml'],
     parser: createCheerioParser() || { parse: () => { throw new Error('No HTML parser available'); }, 
                                      tokenize: () => [], 
-                                     canParse: () => false },
+                                     canParse: (source: string) => /^\s*<[a-zA-Z!]/.test(source) },
     keywords: [
       'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio', 'b', 'base',
       'bdi', 'bdo', 'blockquote', 'body', 'br', 'button', 'canvas', 'caption',
@@ -494,7 +494,8 @@ import { UniversalTranspiler, createUniversalTranspiler } from './core/universal
 import { createMistralClient, MistralClient } from './llm/mistral-client';
 import { createDomainRegistry, DomainRegistry } from './domains/domain-system';
 import { createMultiLevelCache, AdvancedCacheManager } from './cache/cache-manager';
-import type { LLMOptions, MistralOptions } from './llm/mistral-client';
+import type { LLMOptions } from './core/universal-transpiler';
+import type { MistralOptions } from './llm/mistral-client';
 
 export interface UniversalTranspilerOptions {
   // Core options
@@ -567,6 +568,14 @@ export async function createTranspiler(
   // Initialize
   await transpiler.initialize();
   
+  // Register the builtin domains loaded into the registry (web, data, ai, system)
+  for (const domainName of domainRegistry.list()) {
+    const domain = domainRegistry.get(domainName);
+    if (domain) {
+      transpiler.registerDomain(domain);
+    }
+  }
+  
   return transpiler;
 }
 
@@ -580,6 +589,29 @@ export function createSimpleTranspiler(): UniversalTranspiler {
 // ============================================================================
 // Type Exports
 // ============================================================================
+
+import type {
+  ASTNode,
+  Token,
+  Position,
+  SourceLocation,
+  ParseResult,
+  TranspileOptions,
+  TranspileResult,
+  LLMClient,
+  LLMPrompt,
+  LLMResponse,
+  CacheManager,
+  CacheEntry,
+  DomainDefinition,
+  DomainPattern,
+  DomainTransform,
+  FifthGLDefinition,
+  FifthGLAbstraction,
+  FifthGLParameter,
+  FifthGLCompiler,
+  FifthGLInterpreter,
+} from './core/universal-transpiler';
 
 export type {
   UniversalTranspiler,

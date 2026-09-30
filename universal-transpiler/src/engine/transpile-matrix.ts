@@ -14,6 +14,7 @@ import type { ToolchainRegistry } from '../toolchains/registry';
 import type { LLMClient } from '../core/universal-transpiler';
 import {
   haskellToJavaScript,
+  pythonToJavaScript,
   rustToGo,
   type StructuralTranspileResult,
 } from './structural-transpilers';
@@ -39,6 +40,8 @@ const STRUCTURAL_PAIRS: Record<string, (source: string) => StructuralTranspileRe
   'rust->golang': rustToGo,
   'haskell->javascript': haskellToJavaScript,
   'haskell->js': haskellToJavaScript,
+  'python->javascript': pythonToJavaScript,
+  'python->js': pythonToJavaScript,
 };
 
 export class TranspileMatrix {

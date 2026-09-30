@@ -106,6 +106,41 @@ describe('Docker fallback: Haskell (no ghc on this host)', () => {
   }, 300_000);
 });
 
+describe('WebAssembly platform artifacts', () => {
+  it('compiles Rust to a real wasm module via the docker fallback', async () => {
+    const rust = engine.toolchains.get('rust')!;
+    if (!dockerAvailable) return console.warn('skipping: docker unavailable');
+    if (!rust.info.available) return console.warn('skipping: rust unavailable');
+
+    const result = await rust.compile('fn main() { println!("wasm"); }', {
+      platform: 'wasm',
+      entryFile: 'main.rs',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.artifacts[0]).toMatch(/\.wasm$/);
+    expect(fs.existsSync(result.artifacts[0])).toBe(true);
+
+    // A real wasm module starts with the magic bytes 0x00 'a' 's' 'm'
+    const magic = fs.readFileSync(result.artifacts[0]).subarray(0, 4);
+    expect(Array.from(magic)).toEqual([0x00, 0x61, 0x73, 0x6d]);
+  }, 300_000);
+
+  it('compiles Go to a real wasm module natively (GOOS=js GOARCH=wasm)', async () => {
+    const go = engine.toolchains.get('go')!;
+    if (!go.info.available) return console.warn('skipping: go unavailable');
+
+    const result = await go.compile('package main\n\nfunc main() { println("wasm") }\n', {
+      platform: 'wasm',
+      entryFile: 'main.go',
+    });
+    expect(result.ok).toBe(true);
+    expect(result.artifacts[0]).toMatch(/\.wasm$/);
+
+    const magic = fs.readFileSync(result.artifacts[0]).subarray(0, 4);
+    expect(Array.from(magic)).toEqual([0x00, 0x61, 0x73, 0x6d]);
+  }, 180_000);
+});
+
 describe('Docker fallback: transparent engine routing', () => {
   it('prefers native binaries and only falls back to docker when missing', async () => {
     // On this machine go IS native: the run must not go through docker

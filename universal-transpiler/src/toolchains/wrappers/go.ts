@@ -85,9 +85,13 @@ export class GoToolchain implements Toolchain {
     writeSourceFile(workDir, 'go.mod', 'module transpiled\n\ngo 1.21\n');
     const entryFile = options.entryFile || 'main.go';
     const filePath = writeSourceFile(workDir, entryFile, source);
-    const outPath = options.outputPath || path.join(workDir, 'program');
+    let outPath = options.outputPath || path.join(workDir, 'program');
 
-    const env = this.platformEnv(options.platform || 'native', options.env);
+    const platform = options.platform || 'native';
+    if ((platform === 'wasm' || platform === 'wasi') && !outPath.endsWith('.wasm')) {
+      outPath = `${outPath}.wasm`;
+    }
+    const env = this.platformEnv(platform, options.env);
     const args = ['build', '-o', outPath, ...(options.extraArgs || []), filePath];
 
     const result = await runCommand('go', args, {

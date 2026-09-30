@@ -10,10 +10,8 @@
  */
 
 import * as crypto from 'crypto';
-import type { ASTNode, Token, ParseResult, TranspileOptions, TranspileResult } from '../core/universal-transpiler';
-import type { LLMClient, CacheManager } from '../llm/mistral-client';
-import type { CodeUnderstanding } from './autonomous-code-understanding';
-import type { RepositoryPattern, CrossRepositoryAnalyzer } from './cross-repository-analysis';
+import type { LLMClient, CacheManager, TranspileOptions } from '../core/universal-transpiler';
+import type { CrossRepositoryAnalyzer } from './cross-repository-analysis';
 
 // ============================================================================
 // Types
@@ -77,6 +75,7 @@ export interface ErrorPattern {
   lastOccurrence: number;
   context: string;
   severity: 'error' | 'warning';
+  confidence?: number;
 }
 
 export interface WarningPattern {
@@ -257,8 +256,6 @@ export interface PredictiveTranspilationOptions {
 
 export class PredictiveTranspiler {
   private llm?: LLMClient;
-  private cache?: CacheManager;
-  private crossRepoAnalyzer?: CrossRepositoryAnalyzer;
   
   private predictionCache: Map<string, PredictionCacheEntry> = new Map();
   private historicalData: Map<string, HistoricalTranspilationData> = new Map();
@@ -276,13 +273,11 @@ export class PredictiveTranspiler {
 
   constructor(
     llm?: LLMClient,
-    cache?: CacheManager,
-    crossRepoAnalyzer?: CrossRepositoryAnalyzer,
+    _cache?: CacheManager,
+    _crossRepoAnalyzer?: CrossRepositoryAnalyzer,
     options?: Partial<PredictiveTranspiler['options']>
   ) {
     this.llm = llm;
-    this.cache = cache;
-    this.crossRepoAnalyzer = crossRepoAnalyzer;
     
     this.options = {
       enableCaching: true,
@@ -642,7 +637,7 @@ export class PredictiveTranspiler {
     if (patternInfo.languagePatterns) {
       const sourceLang = patternInfo.languagePatterns;
       
-      for (const [lang, keywords] of Object.entries(sourceLang)) {
+      for (const [_lang, keywords] of Object.entries(sourceLang)) {
         for (const [keyword, isPresent] of Object.entries(keywords || {})) {
           if (isPresent && source.includes(keyword)) {
             count++;
@@ -743,7 +738,7 @@ export class PredictiveTranspiler {
   // Error Prediction
   // ==========================================================================
 
-  private async predictErrors(options: PredictionOptions): Prediction[] {
+  private async predictErrors(options: PredictionOptions): Promise<Prediction[]> {
     const predictions: Prediction[] = [];
     let llmCalls = 0;
     
@@ -910,7 +905,7 @@ export class PredictiveTranspiler {
     source: string,
     sourceLanguage: string,
     targetLanguage: string,
-    options: TranspileOptions = {}
+    options: Partial<TranspileOptions> = {}
   ): Promise<TranspilationPlan> {
     // Create prediction options
     const predictionOptions: PredictionOptions = {
@@ -952,7 +947,7 @@ export class PredictiveTranspiler {
         dependencies: ['step-parse'],
         estimatedTime: 100 + Math.random() * 500,
         estimatedComplexity: 10 + Math.floor(Math.random() * 20),
-        status: 'pending',
+        status: 'pending' as const,
         errors: [],
         warnings: [],
       }));
@@ -984,7 +979,7 @@ export class PredictiveTranspiler {
         dependencies: ['step-compile'],
         estimatedTime: 50 + Math.random() * 200,
         estimatedComplexity: 5 + Math.floor(Math.random() * 15),
-        status: 'pending',
+        status: 'pending' as const,
         errors: [],
         warnings: [],
       }));
@@ -1192,12 +1187,6 @@ export class PredictiveTranspiler {
       for (let i = 0; i < keys.length * 0.2; i++) {
         this.predictionCache.delete(keys[i]);
       }
-    }
-  }
-
-  private log(...args: any[]): void {
-    if (this.options.debug) {
-      console.log('[PredictiveTranspiler]', ...args);
     }
   }
 }

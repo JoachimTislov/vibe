@@ -229,12 +229,14 @@ export class FilesystemCache implements CacheBackend {
 
   async clear(): Promise<void> {
     try {
-      const files = await fs.promises.readdir(this.basePath);
-      await Promise.all(
-        files
-          .filter(f => f.endsWith('.json'))
-          .map(f => fs.promises.unlink(path.join(this.basePath, f)))
-      );
+      // Synchronous deletion so a clear() issued without await is still
+      // ordered before any subsequent list()/get() on the same tick.
+      const files = fs.readdirSync(this.basePath);
+      for (const file of files) {
+        if (file.endsWith('.json')) {
+          fs.unlinkSync(path.join(this.basePath, file));
+        }
+      }
     } catch {
       // Ignore errors
     }
@@ -381,7 +383,7 @@ export class AdvancedCacheManager implements CacheManager {
     key: string,
     value: any,
     ttl: number = this.defaults.ttl,
-    metadata: Partial<CacheEntry['metadata']> = {}
+    _metadata: Partial<CacheEntry['metadata']> = {}
   ): Promise<void> {
     await this.backend.set(key, value, ttl);
   }

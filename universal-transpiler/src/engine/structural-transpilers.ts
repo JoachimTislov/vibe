@@ -581,3 +581,201 @@ function haskellExprToJs(expr: string): string {
 
   return e;
 }
+
+// ============================================================================
+// Python -> JavaScript
+// ============================================================================
+
+/**
+ * Deterministic Python -> JavaScript structural transpiler (practical
+ * subset): print, def, if/elif/else, for-range, for-in, while,
+ * assignments, f-strings, comments, True/False/None, and/or/not, len,
+ // arithmetic and comparisons. Indentation-based blocks become braces.
+ */
+export function pythonToJavaScript(source: string): StructuralTranspileResult {
+  const rawLines = source.split('\n');
+  const out: string[] = [];
+  const converted: string[] = [];
+  const unsupported: string[] = [];
+
+  // Indent stack: each entry is the indent column that opened a block
+  const indentStack: number[] = [];
+  let pendingBlockOpener = false; // previous logical line ended with ':'
+
+  const closeBlocks = (downTo: number): void => {
+    while (indentStack.length > 0 && indentStack[indentStack.length - 1] >= downTo) {
+      indentStack.pop();
+      out.push('}');
+    }
+  };
+
+  const mapExpr = (expr: string): string => {
+    let e = expr.trim();
+    // f-strings -> template literals
+    const fstr = e.match(/^f"([^"]*)"$/);
+    if (fstr) return `\`${fstr[1].replace(/\{/g, '${').replace(/\}/g, '')}\``;
+    // Booleans / None
+    e = e.replace(/\bTrue\b/g, 'true').replace(/\bFalse\b/g, 'false').replace(/\bNone\b/g, 'null');
+    // and/or/not
+    e = e.replace(/\band\b/g, '&&').replace(/\bor\b/g, '||').replace(/\bnot\s+/g, '!');
+    // len(x) -> (x).length, only for simple arguments
+    e = e.replace(/\blen\(([^()]+)\)/g, '($1).length');
+    // string multiplication is unsupported
+    if (/\*\s*["']/.test(e) || /["']\s*\*\s*\d/.test(e)) {
+      unsupported.push(`string-multiplication: ${e}`);
+    }
+    return e;
+  };
+
+  for (const raw of rawLines) {
+    // Blank lines and comments pass through
+    if (raw.trim() === '') {
+      out.push('');
+      continue;
+    }
+    if (raw.trim().startsWith('#')) {
+      out.push(raw.replace(/^\s*#/, (m) => m.replace('#', '//')));
+      continue;
+    }
+
+    const indent = raw.length - raw.trimStart().length;
+    const trimmed = raw.trim();
+    const pad = ' '.repeat(indent);
+
+    // Block openers end with ':'
+    const isOpener = trimmed.endsWith(':');
+    const head = isOpener ? trimmed.slice(0, -1).trim() : trimmed;
+
+    // The __main__ guard: emit nothing (the condition is always true at
+    // top level in the generated script); its body (main()) becomes a plain
+    // top-level statement. Closing still applies: the guard sits at its own
+    // indent, so any open block above ends here.
+    if (trimmed === 'if __name__ == "__main__":' || trimmed === "if __name__ == '__main__':") {
+      closeBlocks(indent);
+      converted.push('main-guard');
+      continue;
+    }
+
+    // elif / else continue the open if-construct at the same indent —
+    // they must not trigger block closing.
+    const elifMatch = head.match(/^elif\s+(.+)$/);
+    if (elifMatch) {
+      out.push(`${pad}} else if (${mapExpr(elifMatch[1])}) {`);
+      converted.push('elif');
+      continue;
+    }
+    if (head === 'else') {
+      out.push(`${pad}} else {`);
+      converted.push('else');
+      continue;
+    }
+
+    // Any other line: close blocks whose indentation ended (a block ends
+    // when indentation returns to the opener's own column or above it).
+    closeBlocks(indent);
+
+    // def f(args): -> function f(args) {
+    const defMatch = head.match(/^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)$/);
+    if (defMatch) {
+      out.push(`${pad}function ${defMatch[1]}(${defMatch[2]}) {`);
+      indentStack.push(indent);
+      pendingBlockOpener = false;
+      converted.push('def');
+      continue;
+    }
+
+    // if / elif / else
+    const ifMatch = head.match(/^if\s+(.+)$/);
+    if (ifMatch) {
+      out.push(`${pad}if (${mapExpr(ifMatch[1])}) {`);
+      indentStack.push(indent);
+      pendingBlockOpener = false;
+      converted.push('if');
+      continue;
+    }
+    // for i in range(n): / range(a, b) / range(a, b, step)
+    const forRange = head.match(/^for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+range\((.+)\)$/);
+    if (forRange) {
+      const parts = forRange[2].split(',').map((p) => mapExpr(p.trim()));
+      const v = forRange[1];
+      if (parts.length === 1) {
+        out.push(`${pad}for (let ${v} = 0; ${v} < ${parts[0]}; ${v}++) {`);
+      } else if (parts.length === 2) {
+        out.push(`${pad}for (let ${v} = ${parts[0]}; ${v} < ${parts[1]}; ${v}++) {`);
+      } else {
+        out.push(`${pad}for (let ${v} = ${parts[0]}; ${v} < ${parts[1]}; ${v} += ${parts[2]}) {`);
+      }
+      indentStack.push(indent);
+      pendingBlockOpener = false;
+      converted.push('for-range');
+      continue;
+    }
+
+    // for x in list:
+    const forIn = head.match(/^for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+(.+)$/);
+    if (forIn) {
+      out.push(`${pad}for (const ${forIn[1]} of ${mapExpr(forIn[2])}) {`);
+      indentStack.push(indent);
+      pendingBlockOpener = false;
+      converted.push('for-in');
+      continue;
+    }
+
+    // while cond:
+    const whileMatch = head.match(/^while\s+(.+)$/);
+    if (whileMatch) {
+      out.push(`${pad}while (${mapExpr(whileMatch[1])}) {`);
+      indentStack.push(indent);
+      pendingBlockOpener = false;
+      converted.push('while');
+      continue;
+    }
+
+    // print(...)
+    const printMatch = head.match(/^print\((.*)\)$/);
+    if (printMatch) {
+      const args = printMatch[1].split(/,(?![^(]*\))/).map((a) => mapExpr(a));
+      out.push(`${pad}console.log(${args.join(', ')});`);
+      converted.push('print');
+      continue;
+    }
+
+    // Class definitions / imports / comprehensions / try-except: unsupported
+    if (/^(class|import|from|try|except|finally|with|lambda|async|yield)\b/.test(head)) {
+      unsupported.push(`python-construct: ${trimmed}`);
+      out.push(`${pad}// [unsupported] ${trimmed}`);
+      continue;
+    }
+    if (/\[[^\]]*\bfor\b[^\]]*\]/.test(head)) {
+      unsupported.push(`list-comprehension: ${trimmed}`);
+      out.push(`${pad}// [unsupported] ${trimmed}`);
+      continue;
+    }
+
+    // Everything else (assignments, calls, returns, expressions) passes
+    // through with expression mapping
+    const mapped = head
+      .split(/("[^"]*"|'[^']*')/) // keep string literals intact
+      .map((seg) => (seg.startsWith('"') || seg.startsWith("'") ? seg : mapExpr(seg).replace(/;$/, '')))
+      .join('');
+    out.push(`${pad}${mapped};`.replace(/;;$/, ';'));
+    if (/\/\*|\*\//.test(head)) unsupported.push(`comment-like: ${trimmed}`);
+
+    // A non-opener line inside a pending block means the block was empty
+    if (pendingBlockOpener) pendingBlockOpener = false;
+  }
+
+  // Close any remaining blocks at EOF
+  closeBlocks(-1);
+
+  // If a main() function exists, call it (python convention)
+  if (out.some((l) => /^\s*function main\(/.test(l)) && !out.some((l) => /^\s*main\(\);/.test(l))) {
+    out.push('', 'main();');
+  }
+
+  return {
+    code: out.join('\n'),
+    converted: Array.from(new Set(converted)),
+    unsupported: Array.from(new Set(unsupported)),
+  };
+}

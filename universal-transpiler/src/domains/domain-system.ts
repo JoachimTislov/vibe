@@ -35,7 +35,8 @@ export class DomainRegistry {
   private fifthGL: Map<string, FifthGLDefinition> = new Map();
   
   private llm: LLMClient | null = null;
-  private cache: CacheManager | null = null;
+  /** Cache configured via setCacheManager. */
+  cache: CacheManager | null = null;
 
   constructor(llm?: LLMClient, cache?: CacheManager) {
     this.llm = llm || null;
@@ -163,7 +164,7 @@ export class DomainRegistry {
 
   private async calculateDomainConfidence(
     code: string,
-    language: string,
+    _language: string,
     domain: DomainDefinition
   ): Promise<number> {
     let confidence = 0;
@@ -265,11 +266,11 @@ Return a confidence score between 0 and 1.`,
   // Domain Application
   // ==========================================================================
 
-  async applyToAST(
+  applyToAST(
     ast: ASTNode,
     domainName: string,
-    options: TranspileOptions = {}
-  ): Promise<ASTNode> {
+    _options: Partial<TranspileOptions> = {}
+  ): ASTNode {
     const domain = this.get(domainName);
     if (!domain) {
       throw new Error(`Unknown domain: ${domainName}`);
@@ -280,13 +281,13 @@ Return a confidence score between 0 and 1.`,
     // Apply patterns
     if (domain.patterns) {
       for (const pattern of domain.patterns) {
-        result = await this.applyPattern(result, pattern, domain);
+        result = this.applyPattern(result, pattern, domain);
       }
     }
     
     // Apply transforms
     if (domain.transforms) {
-      for (const [name, transform] of Object.entries(domain.transforms)) {
+      for (const [_name, transform] of Object.entries(domain.transforms)) {
         result = this.applyTransform(result, transform);
       }
     }
@@ -294,11 +295,11 @@ Return a confidence score between 0 and 1.`,
     return result;
   }
 
-  private async applyPattern(
+  private applyPattern(
     ast: ASTNode,
     pattern: DomainPattern,
     domain: DomainDefinition
-  ): Promise<ASTNode> {
+  ): ASTNode {
     const matches = this.findMatches(ast, pattern.pattern);
     
     let result = ast;
@@ -457,7 +458,7 @@ Return a confidence score between 0 and 1.`,
     abstraction: FifthGLAbstraction,
     domainName: string,
     targetLanguage: string,
-    options: any = {}
+    _options: any = {}
   ): Promise<string> {
     const domain = this.get(domainName);
     if (!domain) {
@@ -513,7 +514,7 @@ Return ONLY the generated source code without any explanation.`,
     abstraction: FifthGLAbstraction,
     domainName: string,
     input: any,
-    options: any = {}
+    _options: any = {}
   ): Promise<any> {
     const domain = this.get(domainName);
     if (!domain) {
@@ -583,13 +584,13 @@ Return ONLY a JSON object with the result: { "result": <value>, "type": <type>, 
     interpreter?: Partial<FifthGLInterpreter>
   ): FifthGLDefinition {
     const fullCompiler: FifthGLCompiler = {
-      compile: compiler?.compile || ((abstraction, target) => {
+      compile: compiler?.compile || ((_abstraction, target) => {
         throw new Error(`No compiler for ${name} to ${target}`);
       }),
     };
     
     const fullInterpreter: FifthGLInterpreter = {
-      execute: interpreter?.execute || ((abstraction, input) => {
+      execute: interpreter?.execute || ((_abstraction, _input) => {
         throw new Error(`No interpreter for ${name}`);
       }),
     };
@@ -739,7 +740,7 @@ Return ONLY a JSON object with the result: { "result": <value>, "type": <type>, 
           this.createPattern(
             'component-declaration',
             (node: ASTNode) => node.type === 'FunctionDeclaration' &&
-                               /^[A-Z]/.test(node.id?.name || ''),
+                               /^[A-Z]/.test(String(node.value?.name ?? node.value ?? '')),
             (node) => ({
               ...node,
               metadata: {
@@ -1041,7 +1042,7 @@ Return ONLY a JSON object with the result: { "result": <value>, "type": <type>, 
           this.createPattern(
             'game-object',
             (node: ASTNode) => node.type === 'ClassDeclaration' &&
-                               /Component|MonoBehaviour/.test(node.superClass?.toString() || ''),
+                               /Component|MonoBehaviour/.test(String(node.value?.superClass ?? node.value ?? '')),
             (node) => ({
               ...node,
               metadata: {
@@ -1304,7 +1305,6 @@ Return ONLY a JSON object with the result: { "result": <value>, "type": <type>, 
       case 'declaration':
         if (abstraction.name === 'Component') {
           const name = (abstraction.body as any).name || 'Component';
-          const props = (abstraction.body as any).props || {};
           const state = (abstraction.body as any).state || {};
           
           return `import React, { useState } from 'react';
@@ -1434,8 +1434,6 @@ result = pipeline.execute()`;
     switch (abstraction.type) {
       case 'declaration':
         if (abstraction.name === 'Model') {
-          const body = abstraction.body as any;
-          
           return `from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense
 
