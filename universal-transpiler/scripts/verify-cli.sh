@@ -357,6 +357,36 @@ echo "ok - the web-backend agent produced a gofmt-standard net/http scaffold"
 sed 's/^/    /' "$TMP/scaffold.err" | head -6
 pass=$((pass + 1))
 
+banner "dispatch orders.system (the generalized 5GL system declaration)"
+cat > "$TMP/orders.system" <<'SYS'
+# The orders service, declared
+system web-backend "Orders service" {
+    platform native
+
+    record Order {
+        id
+        customer
+        total
+    }
+
+    module api {
+        endpoint GET /health
+        endpoint GET /orders
+        endpoint POST /orders
+    }
+}
+SYS
+node "$CLI" dispatch "$TMP/orders.system" --produce code --code-target go --state "$STATE" > "$TMP/system.out" 2> "$TMP/system.err"
+grep -q 'agent: agent:web-backend (domain web-backend)' "$TMP/system.err" || fail "dispatch system: wrong agent routed"
+grep -q 'compiled the system declaration' "$TMP/system.err" || fail "dispatch system: declaration not compiled"
+grep -q 'type Order struct' "$TMP/system.out" || fail "dispatch system: declared record missing"
+grep -q 'http.HandleFunc("/orders"' "$TMP/system.out" || fail "dispatch system: declared route missing"
+grep -q 'standards: style gofmt' "$TMP/system.err" || fail "dispatch system: go standard missing"
+node "$CLI" dispatch "$TMP/orders.system" --produce dsl --state "$STATE" > "$TMP/system-dsl.out" 2> /dev/null
+grep -q 'system web-backend "Orders service"' "$TMP/system-dsl.out" || fail "dispatch system: dsl re-emission missing"
+echo "ok - a system declaration compiled to a go server and re-emitted as canonical DSL"
+pass=$((pass + 1))
+
 banner "dispatch weekly.dsl --produce code --code-target go"
 node "$CLI" dispatch "$TMP/weekly.dsl" --produce code --code-target go --state "$STATE" > "$TMP/dispatch-go.out" 2> "$TMP/dispatch-go.err"
 grep -q 'package main' "$TMP/dispatch-go.out" || fail "dispatch code: go program missing"

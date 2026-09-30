@@ -138,6 +138,26 @@ deadlock the system. Decision sites today:
   and a fallback target has no transpiler, the model decides whether to
   retry with the next capable target or escalate to diagnostics
 
+## The 5GL layers: declarative documents
+
+Two declarative document forms drive production; both are parsed,
+persisted for vocabulary, and compiled deterministically:
+
+- **workflow DSL** (`workflow food-tracking "..."`): the domain-specific
+  5GL for food workflows — collections, consumption plans, rules —
+  compiled to the reference run, standalone programs (js/ts/go/rust) and
+  shopping.v1 service payloads.
+- **system DSL** (`system <domain> "..."`): the generalized 5GL for any
+  domain — records and modules (HTTP endpoints, commands) — compiled to
+  a runnable artifact wired to the declaration (web-backend servers in
+  go/js/python, cli dispatchers in go/js/python). The declaration IS the
+  specification: the same document yields the same behavior in every
+  supported target.
+
+Inside an agent, a parsed declarative document outranks both the
+deterministic scaffold and the LLM tier (`strategy: 'system-dsl'`): the
+document already specifies the artifact; generation is deterministic.
+
 ## The dispatch flow: a designated agent per domain
 
 `engine.dispatch(source, request)` is the full flow through the universal
