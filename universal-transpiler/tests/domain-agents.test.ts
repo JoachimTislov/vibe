@@ -229,11 +229,12 @@ describe('runtime domain agents (execution domains)', () => {
     expect(js.produced.text).toContain('http.createServer');
   });
 
-  it('scaffold requests without a scaffold for the domain execute instead', async () => {
-    // game domain has no scaffold generator: the agent executes the source
+  it('scaffold requests without a scaffold for the domain+target execute instead', async () => {
+    // game has no python scaffold and this engine has no LLM: execute the source
     const result = await engine.dispatch('println("game loop");\n', {
       domain: 'game',
       produce: 'scaffold',
+      codeTarget: 'python',
       language: 'rust',
     });
     expect(result.agent).toBe('agent:game');
@@ -257,7 +258,7 @@ describe('runtime domain agents (execution domains)', () => {
   it('the LLM produce tier generates code for domains without scaffolds', async () => {
     const mockLlm = {
       generate: async () => ({
-        content: '```go\npackage main\n\nfunc main() { println("generated") }\n```',
+        content: '```python\nprint("generated")\n```\ntrailing note',
         usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
       }),
     } as never as import('../src/core/universal-transpiler').LLMClient;
@@ -266,27 +267,49 @@ describe('runtime domain agents (execution domains)', () => {
       llm: mockLlm,
     });
 
+    // game has no python scaffold: the LLM tier generates it
+    const result = await withLlm.dispatch('// game loop update sprites\n', {
+      domain: 'game',
+      produce: 'code',
+      codeTarget: 'python',
+      language: 'javascript',
+    });
+    expect(result.agent).toBe('agent:game');
+    expect(result.produced.kind).toBe('generated-code');
+    expect((result.produced.payload as { strategy: string }).strategy).toBe('llm-generated');
+    // markdown fences (and trailing prose) are stripped from the LLM answer
+    expect(result.produced.text).toContain('print("generated")');
+    expect(result.produced.text).not.toContain('```');
+    expect(result.produced.text).not.toContain('trailing note');
+    expect(result.standards.style).toBe('pep8');
+    expect(result.notes.join(' ')).toContain('LLM tier');
+  });
+
+  it('deterministic scaffolds win over the LLM tier where they exist', async () => {
+    const withLlm = new UniversalEngine({
+      statePath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'univ-llm-det-')), 's.json'),
+      llm: {
+        generate: async () => {
+          throw new Error('LLM must not be consulted when a scaffold exists');
+        },
+      } as never as import('../src/core/universal-transpiler').LLMClient,
+    });
     const result = await withLlm.dispatch('// game loop update sprites\n', {
       domain: 'game',
       produce: 'code',
       codeTarget: 'go',
       language: 'javascript',
     });
-    expect(result.agent).toBe('agent:game');
-    expect(result.produced.kind).toBe('generated-code');
-    expect((result.produced.payload as { strategy: string }).strategy).toBe('llm-generated');
-    // markdown fences are stripped from the LLM answer
-    expect(result.produced.text).toContain('package main');
-    expect(result.produced.text).not.toContain('```');
-    expect(result.standards.style).toBe('gofmt');
-    expect(result.notes.join(' ')).toContain('LLM tier');
+    expect(result.produced.kind).toBe('scaffold');
+    expect((result.produced.payload as { strategy: string }).strategy).toBe('deterministic-scaffold');
+    expect(result.produced.text).toContain('game: player at');
   });
 
   it('without an LLM, scaffoldless domains execute the source instead', async () => {
     const result = await engine.dispatch('// game loop update sprites\n', {
       domain: 'game',
       produce: 'code',
-      codeTarget: 'go',
+      codeTarget: 'python',
       language: 'javascript',
     });
     expect(result.produced.kind).toBe('engine-run');

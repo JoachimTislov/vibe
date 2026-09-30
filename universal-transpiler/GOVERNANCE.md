@@ -177,9 +177,11 @@ producing:
 2. **Structural transpilers** — verified language pairs, deterministic.
 3. **Deterministic domain scaffolds** — dependency-free, generated
    code for the domain+target (HTTP server, CLI, test module, data
-   pipeline, threads...). Identical input yields identical code, and
-   every runnable scaffold is executed by the test suite before a client
-   ever receives it.
+   pipeline, threads, game tick loop, gradient-descent fit, mobile screen
+   state machine, a hand-assembled wasm module built, validated and
+   instantiated...). Identical input yields identical code, and every
+   runnable scaffold is executed by the test suite before a client ever
+   receives it.
 4. **LLM tier (Mistral)** — when no scaffold exists for the domain and
    target, the agent generates domain code on the fly: a prompt built
    from the structured interpretation (never free-form intent), demanding

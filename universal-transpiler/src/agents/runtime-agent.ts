@@ -202,12 +202,12 @@ export class RuntimeDomainAgent implements DomainAgent {
 
       if (!response.content || response.content.trim().length === 0) return undefined;
       let code = response.content.trim();
-      // The model was told not to fence; strip anyway. Handle both closed
-      // and truncated (token-limited) fenced blocks: drop the opening
-      // fence line and any closing fence, keep the code between.
-      const openFence = code.match(/^```[^\n]*\r?\n/);
-      if (openFence) code = code.slice(openFence[0].length);
-      code = code.replace(/\r?\n?```\s*$/, '');
+      // The model was told not to fence; strip anyway. Take the content of
+      // the first fenced block when present — closed blocks drop any
+      // trailing prose, truncated (token-limited) blocks keep everything
+      // after the opening fence line.
+      const fenced = code.match(/```[^\n]*\r?\n([\s\S]*?)(?:```|$)/);
+      if (fenced) code = fenced[1].trim();
       return code.length > 0 ? code : undefined;
     } catch {
       return undefined;

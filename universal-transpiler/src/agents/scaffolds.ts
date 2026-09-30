@@ -19,6 +19,10 @@ export const SCAFFOLD_DOMAINS: string[] = [
   'testing',
   'data',
   'systems',
+  'game',
+  'ml',
+  'mobile',
+  'wasm',
 ];
 
 export interface ScaffoldOptions {
@@ -61,6 +65,14 @@ export function generateScaffold(
       return data(target, name);
     case 'systems':
       return systems(target, name);
+    case 'game':
+      return game(target, name);
+    case 'ml':
+      return ml(target, name);
+    case 'mobile':
+      return mobile(target, name);
+    case 'wasm':
+      return wasm(target, name);
     default:
       return undefined;
   }
@@ -606,4 +618,198 @@ function systems(target: ScaffoldTarget, name: string): string | undefined {
         ``,
       ].join('\n');
   }
+}
+
+// ============================================================================
+// game: a tick loop over player input
+// ============================================================================
+
+function game(target: ScaffoldTarget, name: string): string | undefined {
+  switch (target) {
+    case 'javascript':
+    case 'typescript':
+      return [
+        `// ${name}: game scaffold (tick loop)`,
+        `const inputs = ['right', 'up', 'right', 'down'];`,
+        `let x = 0;`,
+        `let y = 0;`,
+        ``,
+        `for (const input of inputs) {`,
+        `  if (input === 'left') x -= 1;`,
+        `  else if (input === 'right') x += 1;`,
+        `  else if (input === 'up') y += 1;`,
+        `  else if (input === 'down') y -= 1;`,
+        `}`,
+        ``,
+        `console.log(\`game: player at (\${x}, \${y})\`);`,
+        ``,
+      ].join('\n');
+    case 'go':
+      return [
+        `// ${name}: game scaffold (tick loop)`,
+        `package main`,
+        ``,
+        `import "fmt"`,
+        ``,
+        `func main() {`,
+        `	inputs := []string{"right", "up", "right", "down"}`,
+        `	x, y := 0, 0`,
+        `	for _, input := range inputs {`,
+        `		switch input {`,
+        `		case "left":`,
+        `			x--`,
+        `		case "right":`,
+        `			x++`,
+        `		case "up":`,
+        `			y++`,
+        `		case "down":`,
+        `			y--`,
+        `		}`,
+        `	}`,
+        `	fmt.Printf("game: player at (%d, %d)\\n", x, y)`,
+        `}`,
+        ``,
+      ].join('\n');
+    default:
+      return undefined;
+  }
+}
+
+// ============================================================================
+// ml: gradient descent on a tiny dataset (standard library only)
+// ============================================================================
+
+function ml(target: ScaffoldTarget, name: string): string | undefined {
+  switch (target) {
+    case 'javascript':
+    case 'typescript':
+      return [
+        `// ${name}: ml scaffold (gradient descent)`,
+        `const data = [[1, 2.0], [2, 4.1], [3, 5.9], [4, 8.2]];`,
+        `let m = 0;`,
+        `let b = 0;`,
+        `const lr = 0.01;`,
+        ``,
+        `for (let epoch = 0; epoch < 200; epoch++) {`,
+        `  let dm = 0;`,
+        `  let db = 0;`,
+        `  for (const [xv, yv] of data) {`,
+        `    const err = (m * xv + b) - yv;`,
+        `    dm += 2 * err * xv;`,
+        `    db += 2 * err;`,
+        `  }`,
+        `  m -= (lr * dm) / data.length;`,
+        `  b -= (lr * db) / data.length;`,
+        `}`,
+        ``,
+        `console.log(\`ml: fit y = \${m.toFixed(3)}x + \${b.toFixed(3)}\`);`,
+        ``,
+      ].join('\n');
+    case 'go':
+      return [
+        `// ${name}: ml scaffold (gradient descent)`,
+        `package main`,
+        ``,
+        `import "fmt"`,
+        ``,
+        `func main() {`,
+        `	data := [][2]float64{{1, 2.0}, {2, 4.1}, {3, 5.9}, {4, 8.2}}`,
+        `	m, b, lr := 0.0, 0.0, 0.01`,
+        `	for epoch := 0; epoch < 200; epoch++ {`,
+        `		dm, db := 0.0, 0.0`,
+        `		for _, d := range data {`,
+        `			err := m*d[0] + b - d[1]`,
+        `			dm += 2 * err * d[0]`,
+        `			db += 2 * err`,
+        `		}`,
+        `		m -= lr * dm / float64(len(data))`,
+        `		b -= lr * db / float64(len(data))`,
+        `	}`,
+        `	fmt.Printf("ml: fit y = %.3fx + %.3f\\n", m, b)`,
+        `}`,
+        ``,
+      ].join('\n');
+    default:
+      return undefined;
+  }
+}
+
+// ============================================================================
+// mobile: a screen state machine with an item store
+// ============================================================================
+
+function mobile(target: ScaffoldTarget, name: string): string | undefined {
+  switch (target) {
+    case 'javascript':
+    case 'typescript':
+      return [
+        `// ${name}: mobile scaffold (screen state machine)`,
+        `const transitions = { home: 'list', list: 'detail', detail: 'home' };`,
+        `let screen = 'home';`,
+        `const items = [];`,
+        ``,
+        `for (let i = 0; i < 2; i++) {`,
+        `  items.push(\`item-\${i}\`);`,
+        `}`,
+        `for (const _ of ['home', 'list', 'detail']) {`,
+        `  screen = transitions[screen];`,
+        `}`,
+        ``,
+        `console.log(\`mobile: at \${screen} with \${items.length} items\`);`,
+        ``,
+      ].join('\n');
+    case 'go':
+      return [
+        `// ${name}: mobile scaffold (screen state machine)`,
+        `package main`,
+        ``,
+        `import "fmt"`,
+        ``,
+        `func main() {`,
+        `	transitions := map[string]string{"home": "list", "list": "detail", "detail": "home"}`,
+        `	screen := "home"`,
+        `	items := []string{}`,
+        `	for i := 0; i < 2; i++ {`,
+        `		items = append(items, fmt.Sprintf("item-%d", i))`,
+        `	}`,
+        `	for range []string{"home", "list", "detail"} {`,
+        `		screen = transitions[screen]`,
+        `	}`,
+        `	fmt.Printf("mobile: at %s with %d items\\n", screen, len(items))`,
+        `}`,
+        ``,
+      ].join('\n');
+    default:
+      return undefined;
+  }
+}
+
+// ============================================================================
+// wasm: build, validate and instantiate a tiny WebAssembly module
+// ============================================================================
+
+function wasm(target: ScaffoldTarget, name: string): string | undefined {
+  if (target !== 'javascript' && target !== 'typescript') return undefined;
+  return [
+    `// ${name}: wasm scaffold (build + validate + instantiate)`,
+    `// A hand-assembled wasm module exporting add(i32, i32) -> i32:`,
+    `//   type section   one func type (i32, i32) -> i32`,
+    `//   func section   one func of type 0`,
+    `//   export section "add"`,
+    `//   code section   local.get 0; local.get 1; i32.add; end`,
+    `const bytes = new Uint8Array([`,
+    `  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,`,
+    `  0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,`,
+    `  0x03, 0x02, 0x01, 0x00,`,
+    `  0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00,`,
+    `  0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,`,
+    `]);`,
+    ``,
+    `(async () => {`,
+    `  console.log('wasm: module valid =', WebAssembly.validate(bytes));`,
+    `  const { instance } = await WebAssembly.instantiate(bytes);`,
+    `  console.log('wasm: add(2,3) =', instance.exports.add(2, 3));`,
+    `})();`,
+    ``,
+  ].join('\n');
 }
