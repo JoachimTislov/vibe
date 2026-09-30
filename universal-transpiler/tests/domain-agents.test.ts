@@ -253,6 +253,45 @@ describe('runtime domain agents (execution domains)', () => {
     // go target -> go ecosystem standard by default
     expect(result.standards.style).toBe('gofmt');
   });
+
+  it('the LLM produce tier generates code for domains without scaffolds', async () => {
+    const mockLlm = {
+      generate: async () => ({
+        content: '```go\npackage main\n\nfunc main() { println("generated") }\n```',
+        usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+      }),
+    } as never as import('../src/core/universal-transpiler').LLMClient;
+    const withLlm = new UniversalEngine({
+      statePath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'univ-llm-agent-')), 's.json'),
+      llm: mockLlm,
+    });
+
+    const result = await withLlm.dispatch('// game loop update sprites\n', {
+      domain: 'game',
+      produce: 'code',
+      codeTarget: 'go',
+      language: 'javascript',
+    });
+    expect(result.agent).toBe('agent:game');
+    expect(result.produced.kind).toBe('generated-code');
+    expect((result.produced.payload as { strategy: string }).strategy).toBe('llm-generated');
+    // markdown fences are stripped from the LLM answer
+    expect(result.produced.text).toContain('package main');
+    expect(result.produced.text).not.toContain('```');
+    expect(result.standards.style).toBe('gofmt');
+    expect(result.notes.join(' ')).toContain('LLM tier');
+  });
+
+  it('without an LLM, scaffoldless domains execute the source instead', async () => {
+    const result = await engine.dispatch('// game loop update sprites\n', {
+      domain: 'game',
+      produce: 'code',
+      codeTarget: 'go',
+      language: 'javascript',
+    });
+    expect(result.produced.kind).toBe('engine-run');
+    expect(result.notes.join(' ')).toContain('no LLM configured');
+  });
 });
 
 describe('generic fallback agent', () => {

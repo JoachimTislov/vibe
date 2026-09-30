@@ -58,21 +58,40 @@ export class RuntimeDomainAgent implements DomainAgent {
       (request.produce === 'code' && SCAFFOLD_DOMAINS.includes(this.domain));
     const produce = !request.produce || request.produce === 'auto' ? 'run' : request.produce;
 
-    if (wantsScaffold || produce === 'scaffold') {
+    if (wantsScaffold || produce === 'scaffold' || produce === 'code') {
       const target = (request.codeTarget ?? 'javascript') as ScaffoldTarget;
       const code = generateScaffold(this.domain, target);
-      if (code === undefined) {
-        notes.push(`no ${target} scaffold for domain "${this.domain}"; executed the source instead`);
+
+      // No deterministic scaffold for this domain/target: the LLM tier
+      // generates the domain code on the fly (still under the resolved
+      // standards; the judgment layer stays reserved for decisions).
+      const finalCode =
+        code ??
+        (await this.generateViaLLM(target, interpretation, request)) ??
+        undefined;
+
+      if (finalCode === undefined) {
+        notes.push(
+          `no ${target} scaffold for domain "${this.domain}" and no LLM configured; executed the source instead`
+        );
       } else {
-        notes.push(`generated ${target} scaffold for domain "${this.domain}"`);
+        notes.push(
+          code !== undefined
+            ? `generated ${target} scaffold for domain "${this.domain}"`
+            : `generated ${target} domain code for "${this.domain}" via the LLM tier`
+        );
         // Standards of the produced artifact: the target language's
         // ecosystem standard, overridden by the scope's standards
         const scope = request.scope ? this.engine.getScope(request.scope) : undefined;
         const standards: CodeStandards = resolveStandards(target, scope?.codeStandards);
         const produced: DomainAgentProduced = {
-          kind: 'scaffold',
-          payload: { domain: this.domain, target },
-          text: code,
+          kind: code !== undefined ? 'scaffold' : 'generated-code',
+          payload: {
+            domain: this.domain,
+            target,
+            strategy: code !== undefined ? 'deterministic-scaffold' : 'llm-generated',
+          },
+          text: finalCode,
         };
         return {
           agent: this.id,
@@ -137,5 +156,61 @@ export class RuntimeDomainAgent implements DomainAgent {
       judgment: request.judgment,
       notes,
     };
+  }
+
+  /**
+   * The LLM produce tier: generate domain-typical code for a target when
+   * no deterministic scaffold exists. The prompt carries the structured
+   * interpretation (domain, matched keywords, frameworks, platform,
+   * standards) — machine-consumable evidence, not free-form intent.
+   */
+  private async generateViaLLM(
+    target: string,
+    interpretation: InterpretationReport,
+    request: DomainAgentFlowRequest
+  ): Promise<string | undefined> {
+    const llm = this.engine.llm;
+    if (!llm) return undefined;
+
+    const scope = request.scope ? this.engine.getScope(request.scope) : undefined;
+    const standards = resolveStandards(target, scope?.codeStandards);
+
+    try {
+      const response = await llm.generate(
+        {
+          system:
+            `You are a code generator for the "${this.domain}" domain. Produce a ` +
+            `minimal, runnable ${target} program that is representative of ` +
+            `this domain: under 40 lines, using ONLY the ${target} standard ` +
+            `library (no third-party packages or imports whatsoever), no ` +
+            `large inline data (at most a handful of small literals), must ` +
+            `execute standalone with exit code 0. Follow the ${standards.style} ` +
+            `style. Return ONLY the code, no markdown fences, no explanations.`,
+          user: JSON.stringify({
+            domain: this.domain,
+            targetLanguage: target,
+            matchedKeywords: interpretation.analysis.matchedKeywords,
+            frameworks: interpretation.analysis.frameworks,
+            platform: interpretation.analysis.platform,
+            sourceLanguage: interpretation.analysis.language,
+            standards,
+            requestContext: request.source.slice(0, 2000),
+          }),
+        },
+        { maxTokens: 8192 }
+      );
+
+      if (!response.content || response.content.trim().length === 0) return undefined;
+      let code = response.content.trim();
+      // The model was told not to fence; strip anyway. Handle both closed
+      // and truncated (token-limited) fenced blocks: drop the opening
+      // fence line and any closing fence, keep the code between.
+      const openFence = code.match(/^```[^\n]*\r?\n/);
+      if (openFence) code = code.slice(openFence[0].length);
+      code = code.replace(/\r?\n?```\s*$/, '');
+      return code.length > 0 ? code : undefined;
+    } catch {
+      return undefined;
+    }
   }
 }

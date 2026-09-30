@@ -117,6 +117,23 @@ maybeDescribe('Live Mistral LLM transpile tier (requires MISTRAL_API_KEY)', () =
   }, 180_000);
 });
 
+maybeDescribe('LLM domain code generation (tier 3 inside the agent flow)', () => {
+  it('generates runnable ml-domain code for a target without scaffolds', async () => {
+    const result = await engine.dispatch(
+      '# ml pipeline: train, evaluate, predict on the iris dataset\n',
+      { domain: 'ml', produce: 'code', codeTarget: 'python', language: 'python' }
+    );
+    expect(result.agent).toBe('agent:ml');
+    expect(result.produced.kind).toBe('generated-code');
+    expect((result.produced.payload as { strategy: string }).strategy).toBe('llm-generated');
+    // No markdown fences in the produced artifact
+    expect(result.produced.text).not.toContain('```');
+    // The generated code must at least parse: run it through the engine
+    const run = await engine.run(result.produced.text, { language: 'python' });
+    expect(run.result.ok).toBe(true);
+  }, 180_000);
+});
+
 describe('LLM tier configuration', () => {
   it('keeps the suite hermetic without an API key: tests skip', () => {
     // The suite above is either running (key present) or skipped.

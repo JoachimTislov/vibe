@@ -1336,6 +1336,11 @@ export class UniversalEngine {
   // Introspection
   // ==========================================================================
 
+  /** The configured LLM client, when any (the tier-3 codegen engine). */
+  get llm(): LLMClient | undefined {
+    return this.options.llm;
+  }
+
   /** Report every toolchain, its availability and versions. */
   async status(): Promise<
     { id: string; name: string; available: boolean; languages: string[]; versions: Record<string, string>; frameworks: string[] }[]
