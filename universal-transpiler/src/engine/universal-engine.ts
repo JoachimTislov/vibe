@@ -31,6 +31,15 @@ import {
 import { TranspileMatrix, type MatrixTranspileResult } from './transpile-matrix';
 import { PersistentState, getSharedState } from './persistent-state';
 import { DefinitionVault } from '../vault/definition-vault';
+import {
+  mergePolicy,
+  resolveStandards,
+  type DecisionPolicy,
+  type InterpretationMatch,
+  type InterpretationReport,
+  type ScopeSetup,
+  type ScopeSetupInput,
+} from './user-contract';
 import { parseWorkflowDsl } from '../domains/workflow-dsl';
 import type { FeedbackRecord, Goal } from './persistent-state';
 import type { LLMClient } from '../core/universal-transpiler';
@@ -51,6 +60,11 @@ export interface EngineOptions {
   learn?: { minEncounters?: number; minDominance?: number; minKeywordLength?: number };
   /** Disable learning entirely (state still loads and records) */
   enableLearning?: boolean;
+  /**
+   * The decision policy: every "who decides" rule as data. Defaults in
+   * DEFAULT_DECISION_POLICY; see GOVERNANCE.md for the full contract.
+   */
+  decisionPolicy?: Partial<DecisionPolicy>;
 }
 
 export interface EngineRunRequest extends RunOptions {
@@ -66,6 +80,11 @@ export interface EngineRunRequest extends RunOptions {
    * affects every client.
    */
   clientId?: string;
+  /**
+   * The user's scope this request runs under: restricts interpretation to
+   * the scope's domains and applies the scope's standards/policy.
+   */
+  scope?: string;
 }
 
 export interface EngineRunReport {
@@ -116,10 +135,13 @@ export class UniversalEngine {
    * teaching all flow through it.
    */
   readonly vault: DefinitionVault;
-  private options: Required<Omit<EngineOptions, 'llm' | 'statePath' | 'learn'>> & {
+  /** The active decision policy (data, not hardcoded behavior) */
+  readonly policy: DecisionPolicy;
+  private options: Required<Omit<EngineOptions, 'llm' | 'statePath' | 'learn' | 'decisionPolicy'>> & {
     llm?: LLMClient;
     statePath?: string;
     learn?: EngineOptions['learn'];
+    decisionPolicy?: Partial<DecisionPolicy>;
   };
 
   constructor(options: EngineOptions = {}) {
@@ -132,6 +154,14 @@ export class UniversalEngine {
       : getSharedState();
     this.state.load();
     this.vault = new DefinitionVault(this.state);
+
+    // Decision policy: every governance rule is data (GOVERNANCE.md)
+    this.policy = mergePolicy(options.decisionPolicy);
+    this.state.data.promotionThreshold =
+      typeof this.policy.promotionThreshold === 'number'
+        ? this.policy.promotionThreshold
+        : Number.POSITIVE_INFINITY; // 'agent-decides': only the sweep promotes
+    this.state.observeOnly = this.policy.learningMode === 'observe-only';
 
     this.options = {
       defaultPlatform: 'auto',
@@ -152,7 +182,12 @@ export class UniversalEngine {
   }
 
   /** Full analysis: language + domain + platform + routing decision. */
-  async analyze(source: string, request: EngineRunRequest = {}): Promise<EngineAnalyzeReport> {
+  async analyze(
+    source: string,
+    request: EngineRunRequest = {},
+    /** @internal interpret() learns once, at its own point in the report */
+    _skipLearning = false
+  ): Promise<EngineAnalyzeReport> {
     const notes: string[] = [];
 
     // 1. Language resolution
@@ -185,9 +220,15 @@ export class UniversalEngine {
       }),
     });
 
-    // 3. Learn from this encounter: new keywords are noted and, once
-    //    confirmed across encounters, persisted as definitions.
-    if (this.options.enableLearning) {
+    // 3. Learn from this encounter per the active policy:
+    //    on -> candidates become definitions on corroboration;
+    //    observe-only -> candidates recorded, never promoted;
+    //    off -> no learning at all.
+    const learningActive =
+      this.options.enableLearning &&
+      this.policy.learningMode !== 'off' &&
+      !_skipLearning;
+    if (learningActive) {
       this.state.learnFromSource(source, language);
     }
 
@@ -415,6 +456,200 @@ export class UniversalEngine {
     });
 
     return { project, result };
+  }
+
+  // ==========================================================================
+  // User contract: scopes, teaching, interpretation (GOVERNANCE.md)
+  // ==========================================================================
+
+  /**
+   * Create or replace a user-owned scope setup. The scope setup is the
+   * user-MUTABLE tier of the mutability contract: the user may change it
+   * at any time; the system never writes it.
+   */
+  setupScope(input: ScopeSetupInput): ScopeSetup {
+    const now = Date.now();
+    const existing = (this.state.data.scopes[input.scopeId] as ScopeSetup | undefined);
+    const setup: ScopeSetup = {
+      ...input,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    this.state.data.scopes[input.scopeId] = setup;
+    this.state.save();
+    return setup;
+  }
+
+  /**
+   * Update the user's own scope. Returns undefined when the scope does
+   * not exist (creating requires setupScope — explicit, never implicit).
+   */
+  updateScope(
+    scopeId: string,
+    changes: Partial<ScopeSetupInput>
+  ): ScopeSetup | undefined {
+    const existing = this.state.data.scopes[scopeId] as ScopeSetup | undefined;
+    if (!existing) return undefined;
+    const updated: ScopeSetup = {
+      ...existing,
+      ...changes,
+      scopeId,
+      createdAt: existing.createdAt,
+      updatedAt: Date.now(),
+    };
+    this.state.data.scopes[scopeId] = updated;
+    this.state.save();
+    return updated;
+  }
+
+  /** Read a scope setup (the user-owned state is always inspectable). */
+  getScope(scopeId: string): ScopeSetup | undefined {
+    return this.state.data.scopes[scopeId] as ScopeSetup | undefined;
+  }
+
+  /**
+   * Teach a keyword definition through a scope.
+   *
+   * In-scope teaching (the keyword's domain is within the scope's
+   * domains, or the scope declares no domains) persists immediately —
+   * the persist-on-encounter contract.
+   *
+   * Out-of-scope teaching does NOT write a global definition: it is
+   * recorded as a client proposal (a keyword-domain feedback record)
+   * that only the system's corroboration rules can promote. Users cannot
+   * reach outside the state they set up.
+   */
+  teachKeyword(
+    scopeId: string,
+    keyword: string,
+    domain: string,
+    options: { clientId?: string; semantics?: string; kind?: string; approve?: boolean } = {}
+  ): { mode: 'defined' | 'proposed' } {
+    const scope = this.getScope(scopeId);
+    if (!scope) {
+      throw new Error(`unknown scope "${scopeId}" — create it with setupScope first`);
+    }
+    const inScope = !scope.domains || scope.domains.includes(domain);
+    if (inScope) {
+      this.vault.define(keyword, domain, {
+        semantics: options.semantics,
+        taughtBy: options.clientId,
+        source: 'client-promoted',
+        confidence: options.approve ? 0.9 : 0.8,
+      });
+      return { mode: 'defined' };
+    }
+    // Out of scope: a proposal, promoted only by the system's rules
+    const clientId = options.clientId ?? `scope:${scopeId}`;
+    this.state.recordFeedback(
+      clientId,
+      'keyword-domain',
+      `${keyword}=${domain}`,
+      { approve: false }
+    );
+    return { mode: 'proposed' };
+  }
+
+  /**
+   * The iteration contract, made visible: interpret an input by comparing
+   * every token against the vault's history BEFORE anything else happens.
+   * Returns what matched, what was new, what was learned during this
+   * interpretation, the resulting analysis, the route, and the standards
+   * that produced output would follow.
+   *
+   * This method never executes anything — it is the read-only face of
+   * interpretation.
+   */
+  async interpret(
+    source: string,
+    request: EngineRunRequest = {}
+  ): Promise<InterpretationReport> {
+    const scope = request.scope ? this.getScope(request.scope) : undefined;
+
+    // 1. Compare against history: which known keywords does this input contain?
+    const lower = source.toLowerCase();
+    const matched: InterpretationMatch[] = [];
+    for (const record of this.vault.search()) {
+      if (record.source !== 'builtin' && lower.includes(record.keyword)) {
+        matched.push({
+          keyword: record.keyword,
+          domain: record.domain,
+          source: record.source,
+          learnedNow: false,
+        });
+      }
+    }
+
+    // 2. The analysis (scoped interpretation when a scope is set);
+    //    learning is skipped here so it happens exactly once, below
+    const analysisReport = await this.analyze(source, request, true);
+    const analysis = analysisReport.analysis;
+
+    // 3. Learning per the policy: which tokens were new?
+    const candidatesBefore = new Set(Object.keys(this.state.data.candidates));
+    const identifiers = Array.from(new Set(
+      (source.match(/[A-Za-z_][A-Za-z0-9_]*/g) || [])
+        .map((id) => id.toLowerCase())
+        .filter((id) => id.length >= 4)
+    ));
+    const knownKeywords = new Set(
+      this.vault.search().map((r) => r.keyword)
+    );
+    const newTokens = identifiers.filter(
+      (id) => !knownKeywords.has(id) && !candidatesBefore.has(id)
+    );
+
+    const learned: InterpretationMatch[] = [];
+    const learningActive =
+      this.options.enableLearning && this.policy.learningMode === 'on';
+    if (learningActive) {
+      const promoted = this.state.learnFromSource(
+        source,
+        analysisReport.language
+      );
+      for (const def of promoted) {
+        learned.push({
+          keyword: def.keyword,
+          domain: def.domain,
+          source: def.source,
+          learnedNow: true,
+        });
+        // Post-interpretation truth: a just-learned keyword IS history
+        // now — reflect it in matched, marked learnedNow.
+        const idx = matched.findIndex((m) => m.keyword === def.keyword);
+        if (idx >= 0) {
+          matched[idx].learnedNow = true;
+        } else {
+          matched.push({
+            keyword: def.keyword,
+            domain: def.domain,
+            source: def.source,
+            learnedNow: true,
+          });
+        }
+      }
+    }
+
+    // 4. Standards for anything this interpretation would produce
+    const target =
+      request.platform && request.platform !== 'auto'
+        ? request.platform
+        : analysis.platform;
+    const standards = resolveStandards(
+      String(target),
+      scope?.codeStandards
+    );
+
+    return {
+      tokenCount: identifiers.length,
+      matched,
+      newTokens,
+      learned,
+      analysis,
+      route: analysisReport.route,
+      scope: request.scope,
+      standards,
+    };
   }
 
   // ==========================================================================

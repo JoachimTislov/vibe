@@ -147,6 +147,7 @@ export * from './vault/definition-vault';
 export * from './engine/structural-transpilers';
 export * from './engine/transpile-matrix';
 export * from './engine/persistent-state';
+export * from './engine/user-contract';
 export * from './engine/universal-engine';
 
 // ============================================================================

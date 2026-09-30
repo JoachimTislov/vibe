@@ -91,8 +91,18 @@ export interface PersistentStateData {
   version: string;
   createdAt: number;
   updatedAt: number;
-  /** Confirmed keyword -> domain definitions (persistent) */
+  /** Confirmed keyword -> domain definitions (persistent, domain-scoped keys) */
   keywords: Record<string, KeywordDefinition>;
+  /**
+   * User-owned scope setups (the user-mutable tier of the mutability
+   * contract). The system never writes these; the user owns them.
+   */
+  scopes: Record<string, unknown>;
+  /**
+   * How many distinct clients must corroborate feedback before it moves
+   * upstream. Configurable policy data (was a hardcoded constant).
+   */
+  promotionThreshold: number;
   /** Unconfirmed keyword candidates awaiting repeated evidence */
   candidates: Record<string, Record<string, number>>;
   clients: Record<string, ClientProfile>;
@@ -121,12 +131,18 @@ export interface LearnOptions {
 
 const DEFAULT_MIN_ENCOUNTERS = 3;
 const DEFAULT_MIN_DOMINANCE = 0.6;
-const DEFAULT_PROMOTION_CLIENTS = 2;
+// (The promotion threshold is policy data: state.data.promotionThreshold)
 
 export class PersistentState {
   readonly statePath: string;
   data: PersistentStateData;
   private options: Required<LearnOptions>;
+  /**
+   * Policy flag: when true, unknown keywords are recorded as candidates
+   * but never promoted to definitions. Controlled by the engine's
+   * decision policy (learningMode: 'observe-only').
+   */
+  observeOnly = false;
 
   constructor(statePath?: string, options?: LearnOptions) {
     this.statePath =
@@ -149,6 +165,8 @@ export class PersistentState {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       keywords: {},
+      scopes: {},
+      promotionThreshold: 2,
       candidates: {},
       clients: {},
       goals: [],
@@ -247,6 +265,12 @@ export class PersistentState {
       // Promote to a persistent definition once evidence is strong
       const total = Object.values(candidates).reduce((a, b) => a + b, 0);
       const [topDomain, topCount] = Object.entries(candidates).sort((a, b) => b[1] - a[1])[0] || [null, 0];
+      if (
+        this.observeOnly
+      ) {
+        // observe-only policy: candidates are recorded but never promoted
+        continue;
+      }
       if (
         topDomain &&
         total >= this.options.minEncounters &&
@@ -371,11 +395,12 @@ export class PersistentState {
     this.logProgress('feedback-recorded', `client "${clientId}" -> ${subject}: ${value}`);
     this.save();
 
-    // Promotion threshold check: identical subject+value from enough clients
+    // Promotion threshold check: identical subject+value from enough
+    // clients (the threshold is policy data, configurable per system)
     const agreeing = Object.values(this.data.clients).filter((c) =>
       c.feedback.some((f) => f.subject === subject && f.value === value)
     );
-    if (options.approve || agreeing.length >= DEFAULT_PROMOTION_CLIENTS) {
+    if (options.approve || agreeing.length >= this.data.promotionThreshold) {
       this.promoteFeedback(subject, value);
     }
     return record;
