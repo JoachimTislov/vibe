@@ -148,11 +148,15 @@ persisted for vocabulary, and compiled deterministically:
   compiled to the reference run, standalone programs (js/ts/go/rust) and
   shopping.v1 service payloads.
 - **system DSL** (`system <domain> "..."`): the generalized 5GL for any
-  domain — records and modules (HTTP endpoints, commands) — compiled to
-  a runnable artifact wired to the declaration (web-backend servers in
-  go/js/python, cli dispatchers in go/js/python). The declaration IS the
-  specification: the same document yields the same behavior in every
-  supported target.
+  domain — records and modules — compiled to a runnable artifact wired to
+  the declaration. Module kinds per domain: HTTP `endpoint`s and CRUD
+  `resource` stores (web-backend), `command`s (cli), `job`s over records
+  (data), `case`s (testing), `export`s (wasm). References are validated
+  at parse time (resources and jobs must point at declared records with
+  an id field). The declaration IS the specification: the same document
+  yields the same behavior in every supported target — the generated CRUD
+  server's full lifecycle (list/create/read/update/delete/404) is proven
+  over live HTTP in the test suite.
 
 Inside an agent, a parsed declarative document outranks both the
 deterministic scaffold and the LLM tier (`strategy: 'system-dsl'`): the

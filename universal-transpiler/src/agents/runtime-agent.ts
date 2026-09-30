@@ -39,7 +39,12 @@ export class RuntimeDomainAgent implements DomainAgent {
   }
 
   canHandle(input: { source: string; domain: string; interpretation: InterpretationReport }): boolean {
-    return input.domain.toLowerCase() === this.domain.toLowerCase();
+    // The winning domain, OR an input this agent can structurally parse
+    // (a system declaration for this domain outranks keyword scoring)
+    return (
+      input.domain.toLowerCase() === this.domain.toLowerCase() ||
+      this.inputAffinity(input.source) > 0
+    );
   }
 
   /** 1 when the input is a system declaration for this domain. */

@@ -20,7 +20,11 @@
  *
  *       module <name> {
  *           endpoint <METHOD> <path>     (web-backend)
+ *           resource <Record>            (web-backend: CRUD store)
  *           command <name>                (cli)
+ *           job <name> over <Record>      (data)
+ *           case <name>                   (testing)
+ *           export <f>(i32 i32) -> i32    (wasm)
  *       }
  *   }
  *
@@ -48,10 +52,40 @@ export interface SystemCommand {
   name: string;
 }
 
+/** A CRUD resource over a declared record (web-backend). */
+export interface SystemResource {
+  /** The record name the store holds */
+  record: string;
+}
+
+/** A data job run over a record's samples (data). */
+export interface SystemJob {
+  name: string;
+  record: string;
+}
+
+/** A declared test case (testing). */
+export interface SystemTestCase {
+  name: string;
+}
+
+/** An exported wasm function (wasm). */
+export interface SystemExport {
+  name: string;
+  /** Parameter types (i32 today) */
+  params: string[];
+  /** Result type (i32 today) */
+  result: string;
+}
+
 export interface SystemModule {
   name: string;
   endpoints: SystemEndpoint[];
   commands: SystemCommand[];
+  resources: SystemResource[];
+  jobs: SystemJob[];
+  cases: SystemTestCase[];
+  exports: SystemExport[];
 }
 
 export interface SystemSpec {
@@ -160,7 +194,15 @@ export function parseSystemDsl(source: string): ParsedSystemDocument {
       const moduleMatch = text.match(/^module\s+([a-z][a-z0-9-]*)\s+\{$/);
       if (moduleMatch) {
         current = 'module';
-        currentModule = { name: moduleMatch[1], endpoints: [], commands: [] };
+        currentModule = {
+          name: moduleMatch[1],
+          endpoints: [],
+          commands: [],
+          resources: [],
+          jobs: [],
+          cases: [],
+          exports: [],
+        };
         spec.modules.push(currentModule);
         continue;
       }
@@ -185,13 +227,39 @@ export function parseSystemDsl(source: string): ParsedSystemDocument {
         currentModule.endpoints.push({ method: endpoint[1], path: endpoint[2] });
         continue;
       }
+      const resource = text.match(/^resource\s+([A-Za-z_][A-Za-z0-9_]*)$/);
+      if (resource) {
+        currentModule.resources.push({ record: resource[1] });
+        continue;
+      }
       const command = text.match(/^command\s+([a-z][a-z0-9-]*)$/);
       if (command) {
         currentModule.commands.push({ name: command[1] });
         continue;
       }
+      const job = text.match(/^job\s+([a-z][a-z0-9-]*)\s+over\s+([A-Za-z_][A-Za-z0-9_]*)$/);
+      if (job) {
+        currentModule.jobs.push({ name: job[1], record: job[2] });
+        continue;
+      }
+      const testCase = text.match(/^case\s+([a-z][a-z0-9-]*)$/);
+      if (testCase) {
+        currentModule.cases.push({ name: testCase[1] });
+        continue;
+      }
+      const wasmExport = text.match(/^export\s+([a-z][a-z0-9_]*)\(([^)]*)\)\s*->\s*(i32)$/);
+      if (wasmExport) {
+        const params = wasmExport[2]
+          .split(/[\s,]+/)
+          .filter(Boolean);
+        if (params.length === 0 || params.some((p) => p !== 'i32')) {
+          throw new SystemDslError('export parameters must be i32 (the only wasm type this layer emits)', line);
+        }
+        currentModule.exports.push({ name: wasmExport[1], params, result: wasmExport[3] });
+        continue;
+      }
       throw new SystemDslError(
-        `invalid module item "${text}" (expected endpoint <METHOD> <path> or command <name>)`,
+        'invalid module item (expected endpoint, resource, command, job, case or export)',
         line
       );
     }
@@ -202,6 +270,35 @@ export function parseSystemDsl(source: string): ParsedSystemDocument {
   }
   if (spec.modules.length === 0 && spec.records.length === 0) {
     warnings.push('document declares no modules and no records; the produced artifact is minimal');
+  }
+
+  // Reference integrity: resources and jobs must point at declared records;
+  // a resource store keys by the record's id field
+  const recordNames = new Set(spec.records.map((r) => r.name));
+  for (const module of spec.modules) {
+    for (const resource of module.resources) {
+      const record = spec.records.find((r) => r.name === resource.record);
+      if (!record) {
+        throw new SystemDslError(
+          `resource "${resource.record}" references an undeclared record (declare it with: record ${resource.record} { ... })`,
+          header.line
+        );
+      }
+      if (!record.fields.some((f) => f.toLowerCase() === 'id')) {
+        throw new SystemDslError(
+          `record ${resource.record} is used as a resource but has no id field (stores key by id)`,
+          header.line
+        );
+      }
+    }
+    for (const job of module.jobs) {
+      if (!recordNames.has(job.record)) {
+        throw new SystemDslError(
+          `job "${job.name}" references an undeclared record "${job.record}"`,
+          header.line
+        );
+      }
+    }
   }
 
   return { domain, title: spec.title, spec, warnings };
@@ -235,8 +332,20 @@ export function systemSpecToDsl(spec: SystemSpec): string {
     for (const endpoint of module.endpoints) {
       out.push(`        endpoint ${endpoint.method} ${endpoint.path}`);
     }
+    for (const resource of module.resources) {
+      out.push(`        resource ${resource.record}`);
+    }
     for (const command of module.commands) {
       out.push(`        command ${command.name}`);
+    }
+    for (const job of module.jobs) {
+      out.push(`        job ${job.name} over ${job.record}`);
+    }
+    for (const testCase of module.cases) {
+      out.push(`        case ${testCase.name}`);
+    }
+    for (const exported of module.exports) {
+      out.push(`        export ${exported.name}(${exported.params.join(' ')}) -> ${exported.result}`);
     }
     out.push('    }');
   }

@@ -10,8 +10,10 @@
 
 import { describe, it, expect, beforeAll } from '@jest/globals';
 import * as fs from 'fs';
+import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
+import { spawn } from 'child_process';
 
 import { UniversalEngine } from '../src/engine/universal-engine';
 import {
@@ -78,6 +80,10 @@ describe('system DSL parsing', () => {
           { method: 'POST', path: '/orders' },
         ],
         commands: [],
+        resources: [],
+        jobs: [],
+        cases: [],
+        exports: [],
       },
     ]);
   });
@@ -203,6 +209,220 @@ describe('dispatch: a system document flows through its designated agent', () =>
     expect(run.result.ok).toBe(true);
     expect(run.result.stdout).toContain('greet called with there');
   });
+
+  it('resource declarations: CRUD stores are generated (javascript + go)', async () => {
+    const doc = `system web-backend "Store service" {
+    record Item {
+        id
+        label
+    }
+    module api {
+        resource Item
+    }
+}
+`;
+    const spec = parseSystemDsl(doc).spec;
+
+    const js = generateSystemCode(spec, 'javascript')!;
+    expect(js).toContain('stores.Item');
+    expect(js).toContain(`path: "/items"`);
+    expect(js).toContain(`path: "/items/:id"`);
+    expect(js).toContain('PUT');
+    expect(js).toContain('DELETE');
+    expect(js).toContain('nextId');
+
+    const go = generateSystemCode(spec, 'go')!;
+    expect(go).toContain('var itemStore = map[int]Item{}');
+    expect(go).toContain('http.HandleFunc("/items"');
+    expect(go).toContain('http.HandleFunc("/items/"');
+    expect(go).toContain('delete(itemStore, id)');
+  });
+
+  it('resource and job references are validated against declared records', () => {
+    const noRecord = `system web-backend "x" {
+    module api {
+        resource Missing
+    }
+}
+`;
+    expect(() => parseSystemDsl(noRecord)).toThrow(/undeclared record/);
+
+    const noId = `system web-backend "x" {
+    record Thing {
+        name
+    }
+    module api {
+        resource Thing
+    }
+}
+`;
+    expect(() => parseSystemDsl(noId)).toThrow(/no id field/);
+
+    const badJob = `system data "x" {
+    module jobs {
+        job totals over Missing
+    }
+}
+`;
+    expect(() => parseSystemDsl(badJob)).toThrow(/undeclared record/);
+  });
+
+  it('data jobs execute through the engine with cross-language agreement', async () => {
+    const doc = `system data "Sales analytics" {
+    record Sale {
+        id
+        amount
+    }
+    module jobs {
+        job totals over Sale
+    }
+}
+`;
+    const spec = parseSystemDsl(doc).spec;
+
+    const jsRun = await engine.run(generateSystemCode(spec, 'javascript')!, { language: 'javascript' });
+    expect(jsRun.result.ok).toBe(true);
+    expect(jsRun.result.stdout).toContain('data: job totals over Sale -> count=3 total=60');
+
+    const go = engine.toolchains.forLanguage('go');
+    await go?.probe();
+    if (!go?.info.available) return console.warn('skipping: go unavailable');
+    const goRun = await engine.run(generateSystemCode(spec, 'go')!, { language: 'go' });
+    expect(goRun.result.ok).toBe(true);
+    expect(goRun.result.stdout).toBe(jsRun.result.stdout);
+  });
+
+  it('testing cases compile into a runnable node:test suite', async () => {
+    const doc = `system testing "Contract tests" {
+    record Order {
+        id
+        customer
+    }
+    module contract {
+        case roundtrip
+        case shape
+    }
+}
+`;
+    const code = generateSystemCode(parseSystemDsl(doc).spec, 'javascript')!;
+    const run = await engine.run(code, { language: 'javascript' });
+    expect(run.result.ok).toBe(true);
+    expect(run.result.stdout).toContain('testing: 2 cases declared, all passing');
+  });
+
+  it('wasm exports compile into a valid instantiated module', async () => {
+    const doc = `system wasm "Math kernel" {
+    module math {
+        export add(i32 i32) -> i32
+        export sum3(i32 i32 i32) -> i32
+    }
+}
+`;
+    const code = generateSystemCode(parseSystemDsl(doc).spec, 'javascript')!;
+    const run = await engine.run(code, { language: 'javascript' });
+    expect(run.result.ok).toBe(true);
+    expect(run.result.stdout).toContain('wasm: module valid = true');
+    expect(run.result.stdout).toContain('wasm: add(3,3) = 6');
+    expect(run.result.stdout).toContain('wasm: sum3(3,3,3) = 9');
+  });
+
+  it('dispatch routes a data system document through its designated agent', async () => {
+    const doc = `system data "Sales analytics" {
+    record Sale {
+        id
+        amount
+    }
+    module jobs {
+        job totals over Sale
+    }
+}
+`;
+    const result = await engine.dispatch(doc, { produce: 'code', codeTarget: 'go' });
+    expect(result.agent).toBe('agent:data');
+    expect((result.produced.payload as { strategy: string }).strategy).toBe('system-dsl');
+    expect(result.produced.text).toContain('job totals over Sale');
+  });
+
+  it('the generated CRUD server serves the declared resource over live HTTP', async () => {
+    const doc = `system web-backend "Store service" {
+    record Item {
+        id
+        label
+        total
+    }
+    module api {
+        endpoint GET /health
+        resource Item
+    }
+}
+`;
+    const code = generateSystemCode(parseSystemDsl(doc).spec, 'javascript')!;
+    const file = path.join(os.tmpdir(), `univ-store-server-${Date.now()}.js`);
+    fs.writeFileSync(file, code);
+    const server = spawn('node', [file], { stdio: 'ignore' });
+
+    try {
+      const request = (
+        method: string,
+        urlPath: string,
+        body?: Record<string, unknown>
+      ) =>
+        new Promise<{ status: number; body: string }>((resolve, reject) => {
+          const req = http.request(
+            {
+              host: '127.0.0.1',
+              port: 8080,
+              path: urlPath,
+              method,
+              headers: body ? { 'content-type': 'application/json' } : {},
+            },
+            (res) => {
+              let data = '';
+              res.on('data', (chunk) => (data += chunk));
+              res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }));
+            }
+          );
+          req.on('error', reject);
+          if (body) req.write(JSON.stringify(body));
+          req.end();
+        });
+
+      // Poll until the generated server accepts connections
+      let up = false;
+      for (let i = 0; i < 40 && !up; i++) {
+        try {
+          const health = await request('GET', '/health');
+          up = health.status === 200 && health.body.includes('"ok":true');
+        } catch {
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
+      expect(up).toBe(true);
+
+      // The full CRUD lifecycle over the declared resource
+      const list = await request('GET', '/items');
+      expect(JSON.parse(list.body)).toEqual([]);
+
+      const created = await request('POST', '/items', { label: 'kale', total: 3 });
+      expect(created.status).toBe(201);
+      expect(JSON.parse(created.body)).toMatchObject({ id: 1, label: 'kale', total: 3 });
+
+      const got = await request('GET', '/items/1');
+      expect(JSON.parse(got.body).label).toBe('kale');
+
+      const updated = await request('PUT', '/items/1', { label: 'kale fresh', total: 5 });
+      expect(JSON.parse(updated.body)).toMatchObject({ label: 'kale fresh', total: 5 });
+
+      const deleted = await request('DELETE', '/items/1');
+      expect(JSON.parse(deleted.body)).toEqual({ deleted: true });
+
+      const missing = await request('GET', '/items/1');
+      expect(missing.status).toBe(404);
+    } finally {
+      server.kill();
+      fs.unlinkSync(file);
+    }
+  }, 30_000);
 
   it('produce dsl re-emits the canonical system document', async () => {
     const result = await engine.dispatch(ORDERS, { produce: 'dsl' });
