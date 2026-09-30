@@ -148,6 +148,25 @@ export interface EngineAnalyzeReport {
   notes: string[];
 }
 
+/**
+ * Fallback language preferences per target platform. Data for the routing
+ * helpers: chooseFallbackTarget picks the first workable entry,
+ * fallbackTargets orders the full list the retry-or-escalate judgment
+ * walks.
+ */
+const PLATFORM_FALLBACK_PREFERENCES: Record<string, string[]> = {
+  native: ['go', 'native-c', 'javascript', 'python'],
+  jvm: ['java', 'javascript', 'go'],
+  node: ['javascript', 'python', 'go'],
+  browser: ['javascript'],
+  wasm: ['javascript', 'go', 'rust'],
+  wasi: ['go', 'javascript'],
+  docker: ['go', 'java', 'javascript'],
+  ir: ['javascript', 'java'],
+  deno: ['javascript'],
+  auto: ['javascript', 'go', 'python'],
+};
+
 export class UniversalEngine {
   readonly toolchains: ToolchainRegistry;
   readonly matrix: TranspileMatrix;
@@ -202,6 +221,7 @@ export class UniversalEngine {
         ? this.policy.promotionThreshold
         : Number.POSITIVE_INFINITY; // 'agent-decides': only the sweep promotes
     this.state.observeOnly = this.policy.learningMode === 'observe-only';
+    this.state.autoPromote = this.policy.candidatePromotion === 'on-encounter';
 
     // Judgment models: the open decision layer. The deterministic
     // heuristic model is the default; additional providers (e.g. a
@@ -379,51 +399,92 @@ export class UniversalEngine {
       };
     }
 
-    // Route 2: transpile to a runnable language, then run
-    const fallbackTarget = report.fallbackTarget || 'javascript';
-    const transpilation = await this.matrix.transpile(source, language, fallbackTarget);
-    if (transpilation.strategy === 'unsupported') {
+    // Route 2: transpile to a runnable language, then run. When a target
+    // has no transpiler, a typed 'retry-or-escalate' judgment decides
+    // whether to try the next capable target or escalate to diagnostics.
+    const queue = this.fallbackTargets(language, analysis.platform);
+    const triedTargets: string[] = [];
+
+    while (queue.length > 0) {
+      const fallbackTarget = queue.shift()!;
+      triedTargets.push(fallbackTarget);
+      const transpilation = await this.matrix.transpile(source, language, fallbackTarget);
+
+      if (transpilation.strategy === 'unsupported') {
+        if (queue.length === 0) break;
+        const judgment = await this.judge({
+          kind: 'retry-or-escalate',
+          context: `no transpiler for ${language} -> ${fallbackTarget}`,
+          state: {
+            sourceLanguage: language,
+            failedTarget: fallbackTarget,
+            strategy: transpilation.strategy,
+            triedTargets: [...triedTargets],
+            remainingTargets: [...queue],
+            analysis: { domain: analysis.domain.id, platform: analysis.platform },
+          },
+          options: [
+            ...queue.map((t) => ({
+              value: `retry:${t}`,
+              label: `transpile ${language} -> ${t} instead`,
+              score: 0.8,
+            })),
+            {
+              value: 'escalate',
+              label: 'stop and report diagnostics',
+              score: 0.2,
+            },
+          ],
+        });
+        if (judgment.choice === 'escalate') break;
+        // Serve the retry target the model chose next
+        const retryTarget = judgment.choice.slice('retry:'.length);
+        const index = queue.indexOf(retryTarget);
+        if (index >= 0) queue.splice(index, 1);
+        queue.unshift(retryTarget);
+        continue;
+      }
+
+      // Run the transpiled source on the fallback toolchain
+      const fallbackTc = this.toolchains.forLanguage(fallbackTarget)!;
+      await fallbackTc.probe();
+      const runResult = await fallbackTc.run(transpilation.code, {
+        ...request,
+        platform: this.platformForLanguage(fallbackTarget),
+        timeoutMs: request.timeoutMs || this.options.timeoutMs,
+      });
+
+      // Record empirical evidence in the persistent state
+      this.state.noteTranspile(`${language}->${fallbackTarget}`, transpilation.strategy, runResult.ok);
+
       return {
-        result: {
-          ok: false,
-          stdout: '',
-          stderr:
-            `Cannot run ${language}: no native toolchain on PATH and no transpiler ` +
-            `for ${language} -> ${fallbackTarget}. ` +
-            `Notes: ${report.notes.join('; ')}`,
-          exitCode: 1,
-          durationMs: 0,
-          command: 'engine.run',
-          artifacts: [],
-          toolchain: 'engine',
-        },
-        executedLanguage: language,
+        result: runResult,
+        executedLanguage: fallbackTarget,
         sourceLanguage: language,
         analysis,
-        route: 'failed',
+        route: 'transpile-then-run',
         transpilation,
       };
     }
 
-    // Run the transpiled source on the fallback toolchain
-    const fallbackTc = this.toolchains.forLanguage(fallbackTarget)!;
-    await fallbackTc.probe();
-    const runResult = await fallbackTc.run(transpilation.code, {
-      ...request,
-      platform: this.platformForLanguage(fallbackTarget),
-      timeoutMs: request.timeoutMs || this.options.timeoutMs,
-    });
-
-    // Record empirical evidence in the persistent state
-    this.state.noteTranspile(`${language}->${fallbackTarget}`, transpilation.strategy, runResult.ok);
-
     return {
-      result: runResult,
-      executedLanguage: fallbackTarget,
+      result: {
+        ok: false,
+        stdout: '',
+        stderr:
+          `Cannot run ${language}: no native toolchain on PATH and no transpiler ` +
+          `for ${language} -> ${triedTargets.join(', ')}. ` +
+          `Notes: ${report.notes.join('; ')}`,
+        exitCode: 1,
+        durationMs: 0,
+        command: 'engine.run',
+        artifacts: [],
+        toolchain: 'engine',
+      },
+      executedLanguage: language,
       sourceLanguage: language,
       analysis,
-      route: 'transpile-then-run',
-      transpilation,
+      route: 'failed',
     };
   }
 
@@ -844,6 +905,52 @@ export class UniversalEngine {
       : this.policy;
   }
 
+  /**
+   * The judgment-governed candidate sweep: every eligible keyword
+   * candidate becomes a typed 'promote-candidate' decision. Under the
+   * default heuristic model every eligible candidate promotes (same
+   * outcome as the 'on-encounter' policy); other judgment models may
+   * hold candidates back case by case.
+   */
+  async sweepCandidatePromotions(): Promise<
+    { keyword: string; domain: string; decision: 'promote' | 'hold'; model: string }[]
+  > {
+    const decisions: { keyword: string; domain: string; decision: 'promote' | 'hold'; model: string }[] = [];
+    for (const candidate of this.state.eligibleCandidates()) {
+      const judgment = await this.judge({
+        kind: 'promote-candidate',
+        context: `promote "${candidate.keyword}" to a persisted ${candidate.domain} definition?`,
+        state: {
+          keyword: candidate.keyword,
+          domain: candidate.domain,
+          encounters: candidate.encounters,
+          dominance: candidate.dominance,
+          domainCounts: candidate.domainCounts,
+        },
+        options: [
+          { value: 'promote', label: 'persist the definition (affects all future interpretations)', score: candidate.dominance },
+          { value: 'hold', label: 'keep as a candidate, accumulate more evidence', score: 1 - candidate.dominance },
+        ],
+      });
+      if (judgment.choice === 'promote') {
+        this.state.promoteCandidate(
+          candidate.keyword,
+          candidate.domain,
+          candidate.encounters,
+          candidate.domainCounts[candidate.domain] ?? candidate.encounters
+        );
+      } else {
+        this.state.logProgress(
+          'keyword-candidate',
+          `"${candidate.keyword}" held as candidate by judgment model ${judgment.model} (dominance ${candidate.dominance.toFixed(2)})`
+        );
+      }
+      decisions.push({ keyword: candidate.keyword, domain: candidate.domain, decision: judgment.choice as 'promote' | 'hold', model: judgment.model });
+    }
+    this.state.save();
+    return decisions;
+  }
+
   // ==========================================================================
   // Vocabulary ingestion: documents enrich the vault
   // ==========================================================================
@@ -1000,6 +1107,8 @@ export class UniversalEngine {
    *     with a built-in sample and record the outcome in the persistent
    *     state (success rates become empirical evidence).
    *   - "promote-pending-feedback": run the upstream promotion sweep.
+   *   - "promote-pending-candidates": run the judgment-governed keyword
+   *     candidate sweep.
    *   - "run-hello-world-per-language": run a hello-world through every
    *     available native toolchain.
    * Unknown goals are left for the caller (or an LLM turn) to handle.
@@ -1014,6 +1123,7 @@ export class UniversalEngine {
       const known =
         goal.title === 'verify-transpile-pairs' ||
         goal.title === 'promote-pending-feedback' ||
+        goal.title === 'promote-pending-candidates' ||
         goal.title === 'run-hello-world-per-language';
 
       // Unknown goals remain 'planned' — available for the caller or a
@@ -1031,6 +1141,13 @@ export class UniversalEngine {
         } else if (goal.title === 'promote-pending-feedback') {
           await this.goalPromotePendingFeedback();
           this.state.completeGoal(goal.id, 'promotion sweep complete');
+        } else if (goal.title === 'promote-pending-candidates') {
+          const decisions = await this.sweepCandidatePromotions();
+          const promoted = decisions.filter((d) => d.decision === 'promote').length;
+          this.state.completeGoal(
+            goal.id,
+            `candidate sweep: ${promoted} promoted, ${decisions.length - promoted} held`
+          );
         } else if (goal.title === 'run-hello-world-per-language') {
           const results = await this.goalRunHelloWorlds();
           this.state.completeGoal(goal.id, results);
@@ -1223,26 +1340,8 @@ export class UniversalEngine {
    *   3. JavaScript (the universal lingua franca)
    */
   private chooseFallbackTarget(sourceLanguage: string, platform: PlatformTarget): string {
-    const pairs = this.matrix.structuralPairs();
-    const reachable = new Set<string>();
-    for (const pair of pairs) {
-      const [from, to] = pair.split('->');
-      if (from === sourceLanguage.toLowerCase()) reachable.add(to);
-    }
-
-    const preferences: Record<string, string[]> = {
-      native: ['go', 'native-c', 'javascript', 'python'],
-      jvm: ['java', 'javascript', 'go'],
-      node: ['javascript', 'python', 'go'],
-      browser: ['javascript'],
-      wasm: ['javascript', 'go', 'rust'],
-      wasi: ['go', 'javascript'],
-      docker: ['go', 'java', 'javascript'],
-      ir: ['javascript', 'java'],
-      deno: ['javascript'],
-      auto: ['javascript', 'go', 'python'],
-    };
-    const preferred = preferences[platform] || preferences.auto;
+    const reachable = this.structurallyReachable(sourceLanguage);
+    const preferred = PLATFORM_FALLBACK_PREFERENCES[platform] || PLATFORM_FALLBACK_PREFERENCES.auto;
 
     // Tier 1: structurally reachable AND platform-capable, in preference order
     for (const lang of preferred) {
@@ -1269,6 +1368,49 @@ export class UniversalEngine {
     }
 
     return 'javascript';
+  }
+
+  /**
+   * Every fallback target for a source language, in preference order:
+   * the single best target first, then the remaining platform-capable
+   * languages with available toolchains. The retry-or-escalate judgment
+   * walks this list when a target has no transpiler.
+   */
+  private fallbackTargets(sourceLanguage: string, platform: PlatformTarget): string[] {
+    const out: string[] = [];
+    const push = (lang: string) => {
+      if (lang.toLowerCase() !== sourceLanguage.toLowerCase() && !out.includes(lang)) {
+        out.push(lang);
+      }
+    };
+
+    push(this.chooseFallbackTarget(sourceLanguage, platform));
+
+    const reachable = this.structurallyReachable(sourceLanguage);
+    const preferred = PLATFORM_FALLBACK_PREFERENCES[platform] || PLATFORM_FALLBACK_PREFERENCES.auto;
+    for (const lang of preferred) {
+      const tc = this.toolchains.forLanguage(lang);
+      if (tc && reachable.has(lang) && canTargetPlatform(lang, platform)) push(lang);
+    }
+    for (const lang of reachable) {
+      const tc = this.toolchains.forLanguage(lang);
+      if (tc && canTargetPlatform(lang, platform)) push(lang);
+    }
+    for (const lang of preferred) {
+      const tc = this.toolchains.forLanguage(lang);
+      if (tc && canTargetPlatform(lang, platform)) push(lang);
+    }
+    return out;
+  }
+
+  /** Languages structurally reachable from a source language. */
+  private structurallyReachable(sourceLanguage: string): Set<string> {
+    const reachable = new Set<string>();
+    for (const pair of this.matrix.structuralPairs()) {
+      const [from, to] = pair.split('->');
+      if (from === sourceLanguage.toLowerCase()) reachable.add(to);
+    }
+    return reachable;
   }
 
   private platformForLanguage(language: string): PlatformTarget {

@@ -124,6 +124,16 @@ export interface DecisionPolicy {
    * selectable here, in policy data, with no code change.
    */
   judgmentModel: string;
+  /**
+   * How keyword candidates become definitions:
+   * - 'on-encounter' (default): corroboration rules alone promote a
+   *   candidate once enough encounters accumulate
+   * - 'agent-decides': eligible candidates stay pending and the judgment
+   *   model decides per candidate (typed 'promote-candidate' decision,
+   *   run by engine.sweepCandidatePromotions() and the
+   *   'promote-pending-candidates' goal)
+   */
+  candidatePromotion: 'on-encounter' | 'agent-decides';
 }
 
 export const DEFAULT_DECISION_POLICY: DecisionPolicy = {
@@ -131,6 +141,7 @@ export const DEFAULT_DECISION_POLICY: DecisionPolicy = {
   promotionThreshold: 2,
   learningMode: 'on',
   judgmentModel: 'heuristic',
+  candidatePromotion: 'on-encounter',
 };
 
 export function mergePolicy(overrides?: Partial<DecisionPolicy>): DecisionPolicy {

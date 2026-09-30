@@ -42,6 +42,7 @@ the state they set up.
 | When client feedback becomes global | 2 distinct clients corroborate | `DecisionPolicy.promotionThreshold` (any number, or `'agent-decides'`) |
 | Whether unknown keywords are learned | on (candidates after corroboration) | `DecisionPolicy.learningMode: 'on' \| 'observe-only' \| 'off'` |
 | Which judgment model makes typed decisions | `'heuristic'` (built-in, deterministic) | `DecisionPolicy.judgmentModel` — any registered provider's name |
+| When an eligible keyword candidate becomes a definition | on encounter (corroboration rules) | `DecisionPolicy.candidatePromotion: 'on-encounter' \| 'agent-decides'` |
 | Code style of produced code | the target language's ecosystem standard | `CodeStandards.style` |
 | Scope of teaching | user's declared scope domains | `ScopeSetup.domains` |
 
@@ -128,8 +129,14 @@ deadlock the system. Decision sites today:
   corroboration per pending value; the heuristic default matches the
   numeric threshold behavior)
 
-The kinds `'promote-candidate'` and `'retry-or-escalate'` are reserved
-for the same pattern.
+- `'promote-candidate'` — keyword candidate -> definition promotion under
+  `DecisionPolicy.candidatePromotion: 'agent-decides'`: eligible
+  candidates stay pending and `engine.sweepCandidatePromotions()` (or
+  the `promote-pending-candidates` goal) decides per candidate from its
+  corroboration evidence
+- `'retry-or-escalate'` — when a source language has no native toolchain
+  and a fallback target has no transpiler, the model decides whether to
+  retry with the next capable target or escalate to diagnostics
 
 ## The dispatch flow: a designated agent per domain
 

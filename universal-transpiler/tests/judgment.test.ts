@@ -193,6 +193,106 @@ describe('judgment-governed decision sites', () => {
   });
 });
 
+describe('judgment-governed candidate and retry decisions', () => {
+  const KALE_SOURCE =
+    '// shopping list for the pantry\nconst kale = "green";\nconsole.log(kale);\n';
+
+  function kaleEngine(policy: { judgmentModel?: string }, model?: JudgmentModel) {
+    return new UniversalEngine({
+      statePath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'univ-cand-')), 's.json'),
+      decisionPolicy: { candidatePromotion: 'agent-decides', ...policy },
+      learn: { minEncounters: 2, minDominance: 0.6 },
+      ...(model ? { judgmentModel: model } : {}),
+    });
+  }
+
+  it("promote-candidate: 'agent-decides' defers learning until the sweep promotes", async () => {
+    const engine = kaleEngine({});
+
+    await engine.interpret(KALE_SOURCE);
+    await engine.interpret(KALE_SOURCE);
+
+    // Two encounters: eligible, but no definition without the sweep
+    expect(engine.state.eligibleCandidates().map((c) => c.keyword)).toContain('kale');
+    expect(engine.vault.lookupInDomain('kale', 'food-tracking')).toBeUndefined();
+
+    const decisions = await engine.sweepCandidatePromotions();
+    const kaleDecision = decisions.find((d) => d.keyword === 'kale');
+    expect(kaleDecision?.decision).toBe('promote');
+    expect(kaleDecision?.model).toBe('heuristic');
+    expect(engine.vault.lookupInDomain('kale', 'food-tracking')).toBeDefined();
+  });
+
+  it("promote-candidate: a custom model may hold an eligible candidate back", async () => {
+    const holding: JudgmentModel = {
+      name: 'hold-all',
+      decide: <T extends string>(q: JudgmentQuestion<T>) =>
+        Promise.resolve<Judgment<T>>({
+          choice: 'hold' as T,
+          confidence: 0.6,
+          model: 'hold-all',
+        }),
+    };
+    const engine = kaleEngine({ judgmentModel: 'hold-all' }, holding);
+
+    await engine.interpret(KALE_SOURCE);
+    await engine.interpret(KALE_SOURCE);
+
+    const decisions = await engine.sweepCandidatePromotions();
+    expect(decisions.find((d) => d.keyword === 'kale')?.decision).toBe('hold');
+    expect(engine.vault.lookupInDomain('kale', 'food-tracking')).toBeUndefined();
+    // The candidate survives for future evidence
+    expect(engine.state.eligibleCandidates().map((c) => c.keyword)).toContain('kale');
+  });
+
+  it("promote-pending-candidates goal runs the sweep through autoAdvance", async () => {
+    const engine = kaleEngine({});
+    await engine.interpret(KALE_SOURCE);
+    await engine.interpret(KALE_SOURCE);
+
+    engine.defineGoal('promote-pending-candidates');
+    const { advanced } = await engine.autoAdvance();
+    expect(advanced).toContain('promote-pending-candidates');
+    expect(engine.vault.lookupInDomain('kale', 'food-tracking')).toBeDefined();
+  });
+
+  it('retry-or-escalate: an unrunnable language walks the fallback list and fails cleanly', async () => {
+    const engine = new UniversalEngine({
+      statePath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'univ-retry-')), 's.json'),
+    });
+    const report = await engine.run('display hello cobol\n', { language: 'cobol' });
+    expect(report.route).toBe('failed');
+    expect(report.result.ok).toBe(false);
+    expect(report.result.stderr).toContain('Cannot run cobol');
+  });
+
+  it('retry-or-escalate: an escalating judgment model stops after the first failed target', async () => {
+    const asked: string[] = [];
+    const escalating: JudgmentModel = {
+      name: 'escalate-fast',
+      decide: <T extends string>(q: JudgmentQuestion<T>) => {
+        asked.push(q.kind);
+        return Promise.resolve<Judgment<T>>({
+          choice: 'escalate' as T,
+          confidence: 0.95,
+          model: 'escalate-fast',
+        });
+      },
+    };
+    const engine = new UniversalEngine({
+      statePath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'univ-escalate-')), 's.json'),
+      judgmentModel: escalating,
+      decisionPolicy: { judgmentModel: 'escalate-fast' },
+    });
+    const report = await engine.run('display hello cobol\n', { language: 'cobol' });
+    expect(report.route).toBe('failed');
+    expect(asked).toContain('retry-or-escalate');
+    // Escalation stopped after the first fallback target: the message
+    // mentions exactly one attempted target
+    expect((report.result.stderr.match(/->/g) || []).length).toBe(1);
+  });
+});
+
 describe('engine.judge: the policy selects the provider', () => {
   let engine: UniversalEngine;
   const seen: string[] = [];

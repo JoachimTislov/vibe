@@ -143,6 +143,13 @@ export class PersistentState {
    * decision policy (learningMode: 'observe-only').
    */
   observeOnly = false;
+  /**
+   * Policy flag: when false, eligible candidates are NOT auto-promoted by
+   * the corroboration rules — they stay pending until an explicit
+   * promoteCandidate() (the engine's judgment-governed sweep calls it;
+   * policy: candidatePromotion 'agent-decides').
+   */
+  autoPromote = true;
 
   constructor(statePath?: string, options?: LearnOptions) {
     this.statePath =
@@ -276,20 +283,16 @@ export class PersistentState {
         total >= this.options.minEncounters &&
         topCount / total >= this.options.minDominance
       ) {
-        const def: KeywordDefinition = {
-          keyword: id,
-          domain: topDomain,
-          confidence: Math.min(0.9, 0.3 + 0.15 * (topCount - this.options.minEncounters + 1)),
-          source: 'learned',
-          firstSeen: now,
-          lastSeen: now,
-          occurrences: total,
-        };
-        // Domain-scoped key: one keyword may be defined per domain
-        this.data.keywords[`${id}::${topDomain}`] = def;
-        delete this.data.candidates[id];
-        this.logProgress('keyword-learned', `"${id}" -> domain ${topDomain} (after ${total} encounters)`);
-        learned.push(def);
+        if (!this.autoPromote) {
+          // 'agent-decides': eligible, but promotion waits for the
+          // judgment-governed sweep (engine.sweepCandidatePromotions)
+          this.logProgress(
+            'keyword-candidate',
+            `"${id}" eligible with ${topDomain} (${total} encounters); promotion deferred to agent decision`
+          );
+          continue;
+        }
+        learned.push(this.promoteCandidate(id, topDomain, total, topCount));
       } else {
         this.logProgress('keyword-candidate', `"${id}" observed with ${topDomain ?? 'no domain'} (${total}/${this.options.minEncounters} encounters)`);
       }
@@ -297,6 +300,62 @@ export class PersistentState {
 
     this.save();
     return learned;
+  }
+
+  /**
+   * Promote a pending candidate to a persistent definition. Returns the
+   * definition created. Used by the corroboration rules (on-encounter
+   * policy) and by the judgment-governed sweep (agent-decides policy).
+   */
+  promoteCandidate(keyword: string, domain: string, encounters: number, topCount?: number): KeywordDefinition {
+    const total = encounters ?? 0;
+    const dominant = topCount ?? total;
+    const now = Date.now();
+    const def: KeywordDefinition = {
+      keyword,
+      domain,
+      confidence: Math.min(0.9, 0.3 + 0.15 * (dominant - this.options.minEncounters + 1)),
+      source: 'learned',
+      firstSeen: now,
+      lastSeen: now,
+      occurrences: total,
+    };
+    this.data.keywords[PersistentState.keywordKey(keyword, domain)] = def;
+    delete this.data.candidates[keyword];
+    this.logProgress('keyword-learned', `"${keyword}" -> domain ${domain} (after ${total} encounters)`);
+    this.save();
+    return def;
+  }
+
+  /**
+   * Candidates whose corroboration evidence meets the thresholds — the
+   * eligible set the judgment-governed sweep ('promote-candidate'
+   * decisions) chooses from. Each entry carries the per-domain evidence.
+   */
+  eligibleCandidates(): {
+    keyword: string;
+    domain: string;
+    encounters: number;
+    dominance: number;
+    domainCounts: Record<string, number>;
+  }[] {
+    const out: {
+      keyword: string;
+      domain: string;
+      encounters: number;
+      dominance: number;
+      domainCounts: Record<string, number>;
+    }[] = [];
+    for (const [keyword, counts] of Object.entries(this.data.candidates)) {
+      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      if (total < this.options.minEncounters) continue;
+      const [topDomain, topCount] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0] || [];
+      if (!topDomain) continue;
+      const dominance = topCount / total;
+      if (dominance < this.options.minDominance) continue;
+      out.push({ keyword, domain: topDomain, encounters: total, dominance, domainCounts: counts });
+    }
+    return out;
   }
 
   /**
