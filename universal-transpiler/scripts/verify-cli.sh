@@ -88,6 +88,35 @@ function greet(g: Greet): string {
 greet({ name: "world" });
 EOF
 
+cat > "$TMP/weekly.dsl" <<'EOF'
+workflow food-tracking "Weekly groceries" {
+    reference-date 2026-10-01
+    horizon 7 days
+
+    collection pantry "Pantry" {
+        product Milk (dairy): 2 expiring 2026-10-04, 1 expired 2026-09-28
+        product Pasta (dry goods): 4 non-expiring
+        product Bananas (produce): 6 expiring 2026-10-03
+    }
+
+    consume Milk at 1 per day
+    consume Pasta at 0.5 per day
+    consume Bananas at 1 per day
+
+    meal 2026-10-02 "Carbonara" needs Pasta x2, Milk x1
+}
+
+rules {
+    exclude expired stock
+}
+EOF
+
+cat > "$TMP/broken.dsl" <<'EOF'
+workflow food-tracking "Broken" {
+    reference-date not-a-date
+}
+EOF
+
 # ---------------------------------------------------------------------------
 # 1. status (via npm start, the package.json entry point)
 # ---------------------------------------------------------------------------
@@ -257,6 +286,42 @@ if [ "$DOCKER" = 1 ]; then
 else
   skipped "demo recipes rust"
 fi
+
+# ---------------------------------------------------------------------------
+# 6c. workflow: run a workflow DSL document (parse -> run -> print)
+# ---------------------------------------------------------------------------
+banner "workflow weekly.dsl (parse + reference run)"
+node "$CLI" workflow "$TMP/weekly.dsl" --state "$STATE" > "$TMP/workflow.out" 2> "$TMP/workflow.err"
+grep -q 'workflow: Weekly groceries' "$TMP/workflow.out" || fail "workflow: document title missing"
+# Expired milk is excluded by the rules block: 7 needed - 2 usable = 5 to buy
+grep -q 'product=Milk toBuy=5 usableStock=2 needed=7' "$TMP/workflow.out" || fail "workflow: shopping list wrong"
+grep -q 'product=Bananas quantity=6 daysUntilExpiry=2' "$TMP/workflow.out" || fail "workflow: waste alert missing"
+echo "ok - DSL document parsed and run:"; sed 's/^/    /' "$TMP/workflow.out"
+pass=$((pass + 1))
+
+banner "workflow weekly.dsl --json + --target js"
+node "$CLI" workflow "$TMP/weekly.dsl" --json --state "$STATE" > "$TMP/workflow-json.out" 2> "$TMP/workflow-json.err"
+grep -q '"domain": "food-tracking"' "$TMP/workflow-json.out" || fail "workflow json: domain missing"
+grep -q '"title": "Weekly groceries"' "$TMP/workflow-json.out" || fail "workflow json: title missing"
+grep -q '"toBuy": 5' "$TMP/workflow-json.out" || fail "workflow json: workflow result missing"
+node "$CLI" workflow "$TMP/weekly.dsl" --target js --state "$STATE" > "$TMP/workflow-js.out" 2> "$TMP/workflow-js.err"
+grep -q 'product=Milk toBuy=5' "$TMP/workflow-js.out" || fail "workflow js: reference output missing"
+grep -q '"toBuy": 5' "$TMP/workflow-js.out" || fail "workflow js: generated program output missing"
+grep -q 'route: native-run' "$TMP/workflow-js.err" || fail "workflow js: route not reported"
+echo "ok - workflow document executed through the engine (js target)"
+pass=$((pass + 1))
+
+banner "workflow broken.dsl (syntax error -> file:line, exit 1)"
+set +e
+node "$CLI" workflow "$TMP/broken.dsl" > "$TMP/workflow-bad.out" 2> "$TMP/workflow-bad.err"
+badcode=$?
+set -e
+[ "$badcode" = 1 ] || fail "workflow bad: expected exit code 1, got $badcode"
+grep -q "$TMP/broken.dsl:2:" "$TMP/workflow-bad.err" || fail "workflow bad: file:line prefix missing on stderr"
+grep -q 'invalid ISO date' "$TMP/workflow-bad.err" || fail "workflow bad: error message missing on stderr"
+if grep -q '    at ' "$TMP/workflow-bad.err"; then fail "workflow bad: stack trace leaked"; fi
+echo "ok - syntax error reported as file:line with exit code 1: $(cat "$TMP/workflow-bad.err")"
+pass=$((pass + 1))
 
 # ---------------------------------------------------------------------------
 # 7. goals --advance with one defined goal

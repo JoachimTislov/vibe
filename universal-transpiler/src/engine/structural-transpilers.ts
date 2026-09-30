@@ -8,6 +8,10 @@
  *
  * Supported pairs:
  * - rust -> go   (functions, structs, control flow, printing, basics)
+ * - rust -> python (fn main -> def main + __main__ guard, let/let mut,
+ *   println! -> f-strings, if/elif/else, for-range/for-in, while, loop,
+ *   comments, raw strings, vec! -> list, integer-division semantics;
+ *   match/impl/structs/ownership/closures are flagged as comments)
  * - haskell -> javascript (module main, do-blocks, simple functions)
  * - python -> javascript (print, def, control flow, f-strings, basics)
  * - javascript/typescript -> python (console.log, function/arrow defs,
@@ -2558,6 +2562,1037 @@ export function goToJava(source: string): StructuralTranspileResult {
 
   return {
     code: ['public class Main {', ...out, '}'].join('\n'),
+    converted: Array.from(new Set(converted)),
+    unsupported: Array.from(new Set(unsupported)),
+  };
+}
+
+// ============================================================================
+// Rust -> Python
+// ============================================================================
+
+type RustPyType = 'int' | 'float' | 'str' | 'bool' | 'list' | 'unknown';
+
+/** Shared state for the Rust -> Python converters. */
+interface RustPyContext {
+  converted: string[];
+  unsupported: string[];
+  /** One variable-type map per open function scope. */
+  scopes: Array<Map<string, RustPyType>>;
+  declaredFns: Set<string>;
+  fnReturns: Map<string, RustPyType>;
+}
+
+const RUST_PY_IDENT_SAFE = new Set([
+  'true', 'false', 'as', 'vec', 'mut', 'let', 'fn', 'in', 'if', 'else', 'elif',
+  'while', 'for', 'loop', 'match', 'return', 'break', 'continue', 'not', 'and',
+  'or', 'is', 'None', 'True', 'False', 'print', 'range', 'len', 'float', 'int',
+  'str', 'abs', 'min', 'max', 'sum', 'end', 'file', 'sys',
+]);
+
+/** Rust-isms that must never survive as live Python (leak scan). */
+const RUST_PY_LEAK =
+  /\blet\b|\bfn\b|\bmut\b|\bimpl\b|\bstruct\b|\benum\b|\btrait\b|\bmatch\b|\bloop\b|\buse\b|\bas\b|\btrue\b|\bfalse\b|::|->|!(?!=)|&&|\|\||&|\?|;|\.\.(?!\.)/;
+
+/** Map a Rust type annotation to the inferred Python value kind. */
+function mapRustPyType(rustType: string): RustPyType {
+  const t = rustType.trim().replace(/^&/, '').replace(/^mut\s+/, '').replace(/^&/, '').trim();
+  if (/^(?:i8|i16|i32|i64|u8|u16|u32|u64|usize|isize)$/.test(t)) return 'int';
+  if (/^(?:f32|f64)$/.test(t)) return 'float';
+  if (t === 'bool') return 'bool';
+  if (t === 'str' || t === 'String') return 'str';
+  if (/^Vec\s*</.test(t)) return 'list';
+  return 'unknown';
+}
+
+/** Split an expression into code / string-literal segments. */
+function tokenizeRustExpr(expr: string): Array<{ kind: 'code' | 'str'; text: string }> {
+  const segs: Array<{ kind: 'code' | 'str'; text: string }> = [];
+  let code = '';
+  let i = 0;
+  while (i < expr.length) {
+    const ch = expr[i];
+    if (ch === '"' || ch === "'") {
+      let j = i + 1;
+      while (j < expr.length) {
+        if (expr[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (expr[j] === ch) {
+          j++;
+          break;
+        }
+        j++;
+      }
+      if (code) {
+        segs.push({ kind: 'code', text: code });
+        code = '';
+      }
+      segs.push({ kind: 'str', text: expr.slice(i, j) });
+      i = j;
+      continue;
+    }
+    code += ch;
+    i++;
+  }
+  if (code) segs.push({ kind: 'code', text: code });
+  return segs;
+}
+
+/** Index of the bracket matching the one at openIdx, or -1. */
+function findMatchingBracket(text: string, openIdx: number, open: string, close: string): number {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = openIdx; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Split an expression at any of the given (binary) operators occurring at
+ * top level, ignoring strings and nested brackets. Returns null when none
+ * of the operators occur; `//` (already-converted integer division) never
+ * splits at `/`.
+ */
+function splitRustTopLevelOps(expr: string, ops: string[]): string[] | null {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: string | null = null;
+  let found = false;
+  let i = 0;
+  while (i < expr.length) {
+    const ch = expr[i];
+    if (quote !== null) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = null;
+      i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      i++;
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === ')' || ch === ']' || ch === '}') {
+      depth--;
+      i++;
+      continue;
+    }
+    if (depth === 0) {
+      let advanced = false;
+      for (const op of ops) {
+        if (!expr.startsWith(op, i)) continue;
+        if (/[A-Za-z_]/.test(op[0])) {
+          const before = i > 0 ? expr[i - 1] : ' ';
+          const after = expr[i + op.length] ?? ' ';
+          if (/[\w]/.test(before) || /[\w]/.test(after)) continue;
+        } else {
+          const prev = expr.slice(0, i).replace(/\s+$/, '');
+          if (prev.length === 0 || !/[\w)'"\]]$/.test(prev)) continue; // unary
+          if (op === '/' && (expr[i + 1] === '/' || expr[i - 1] === '/')) continue;
+        }
+        parts.push(expr.slice(start, i));
+        i += op.length;
+        start = i;
+        found = true;
+        advanced = true;
+        break;
+      }
+      if (advanced) continue;
+    }
+    i++;
+  }
+  if (!found) return null;
+  parts.push(expr.slice(start));
+  if (parts.some((p) => p.trim() === '')) return null;
+  return parts;
+}
+
+/**
+ * Infer the Python value kind of an expression from literals, tracked
+ * variable types, and declared function return types.
+ */
+function inferRustPyType(expr: string, ctx: RustPyContext): RustPyType {
+  let e = expr.trim();
+  for (let guard = 0; guard < 16; guard++) {
+    const inner = balancedInner(e, '(', ')');
+    if (inner === null) break;
+    e = inner.trim();
+  }
+  if (e === '') return 'unknown';
+
+  // numeric literals (with or without Rust suffixes)
+  if (/^-?\d[\d_]*$/.test(e)) return 'int';
+  if (/^-?\d[\d_]*(?:i8|i16|i32|i64|u8|u16|u32|u64|isize|usize)$/.test(e)) return 'int';
+  if (/^-?\d[\d_]*f(?:32|64)$/.test(e)) return 'float';
+  if (/^-?(?:\d[\d_]*)?\.\d[\d_]*$/.test(e)) return 'float';
+  if (/^-?\d[\d_]*[eE][+-]?\d+$/.test(e)) return 'float';
+
+  if (/^"[\s\S]*"$/.test(e) || /^'[\s\S]'$/.test(e)) return 'str';
+  if (/^(?:true|false|True|False)$/.test(e)) return 'bool';
+  if (/^\[[\s\S]*\]$/.test(e)) return 'list';
+
+  // forms this transpiler emits
+  if (/^float\s*\([\s\S]*\)$/.test(e)) return 'float';
+  if (/^int\s*\([\s\S]*\)$/.test(e)) return 'int';
+  if (/^len\s*\([\s\S]*\)$/.test(e)) return 'int';
+
+  // Rust casts
+  if (/\s+as\s+f(?:32|64)$/.test(e)) return 'float';
+  if (/\s+as\s+(?:i8|i16|i32|i64|isize|usize)$/.test(e)) return 'int';
+
+  // identifiers
+  if (/^[A-Za-z_]\w*$/.test(e)) {
+    for (let i = ctx.scopes.length - 1; i >= 0; i--) {
+      const t = ctx.scopes[i].get(e);
+      if (t !== undefined) return t;
+    }
+    return 'unknown';
+  }
+
+  // calls
+  const call = e.match(/^([A-Za-z_]\w*)\s*\([\s\S]*\)$/);
+  if (call) {
+    const t = ctx.fnReturns.get(call[1]);
+    if (t !== undefined) return t;
+    return 'unknown';
+  }
+
+  // unary minus / logical negation
+  if (/^-/.test(e)) return inferRustPyType(e.replace(/^-\s*/, ''), ctx);
+  if (/^(?:not|!)/.test(e)) return 'bool';
+
+  // comparisons and logic produce bools
+  if (splitRustTopLevelOps(e, ['==', '!=', '<=', '>=', '<', '>', 'and', 'or'])) return 'bool';
+
+  const add = splitRustTopLevelOps(e, ['+', '-']);
+  if (add) {
+    let anyFloat = false;
+    let allStr = true;
+    let allNum = true;
+    for (const p of add) {
+      const t = inferRustPyType(p, ctx);
+      if (t === 'float') anyFloat = true;
+      if (t !== 'str') allStr = false;
+      if (t !== 'int' && t !== 'float') allNum = false;
+    }
+    if (allStr) return 'str';
+    if (allNum) return anyFloat ? 'float' : 'int';
+    return 'unknown';
+  }
+
+  const mul = splitRustTopLevelOps(e, ['*', '/', '%']);
+  if (mul) {
+    let anyFloat = false;
+    let allNum = true;
+    for (const p of mul) {
+      const t = inferRustPyType(p, ctx);
+      if (t === 'float') anyFloat = true;
+      if (t !== 'int' && t !== 'float') allNum = false;
+    }
+    if (allNum) return anyFloat ? 'float' : 'int';
+    return 'unknown';
+  }
+
+  return 'unknown';
+}
+
+/** Flag identifiers that were never declared (never silently emit them). */
+function checkRustIdentifiers(code: string, ctx: RustPyContext): void {
+  for (const m of code.matchAll(/\b[A-Za-z_]\w*\b/g)) {
+    const name = m[0];
+    if (RUST_PY_IDENT_SAFE.has(name)) continue;
+    if (ctx.declaredFns.has(name)) continue;
+    let known = false;
+    for (const scope of ctx.scopes) {
+      if (scope.has(name)) {
+        known = true;
+        break;
+      }
+    }
+    if (!known) ctx.unsupported.push(`undeclared-identifier: ${name}`);
+  }
+}
+
+/**
+ * Convert Rust `/` operators to Python: int/int becomes `//` (Rust integer
+ * division truncates, Python `/` does not), float involvement keeps `/`,
+ * unknown operand types are flagged instead of silently guessed.
+ */
+function convertRustDivisions(code: string, ctx: RustPyContext): string {
+  // Recurse into bracketed groups first so nested divisions convert too.
+  let out = '';
+  let i = 0;
+  while (i < code.length) {
+    const ch = code[i];
+    if (ch === '(' || ch === '[') {
+      const close = findMatchingBracket(code, i, ch, ch === '(' ? ')' : ']');
+      if (close < 0) {
+        out += code.slice(i);
+        break;
+      }
+      out += ch + convertRustDivisions(code.slice(i + 1, close), ctx) + (ch === '(' ? ')' : ']');
+      i = close + 1;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+
+  const parts = splitRustTopLevelOps(out, ['/']);
+  if (parts === null || parts.length < 2) return out;
+
+  let acc = parts[0].trim();
+  let accType = inferRustPyType(acc, ctx);
+  for (let k = 1; k < parts.length; k++) {
+    const operand = parts[k].trim();
+    const t = inferRustPyType(operand, ctx);
+    let op: string;
+    if (accType === 'int' && t === 'int') {
+      op = ' // ';
+      accType = 'int';
+      ctx.converted.push('integer-division');
+    } else if ((accType === 'int' || accType === 'float') && (t === 'int' || t === 'float')) {
+      op = ' / ';
+      accType = 'float';
+    } else {
+      ctx.unsupported.push(`ambiguous-division: ${out.trim().slice(0, 50)}`);
+      op = ' / ';
+      accType = 'unknown';
+    }
+    acc += op + operand;
+  }
+  return acc;
+}
+
+/** Convert a code segment (no string literals inside) to Python. */
+function convertRustPyCode(code: string, ctx: RustPyContext): string {
+  let c = code;
+
+  // Numeric literal suffixes (10i32, 2f64) are implicit in Python.
+  if (/\d(?:i8|i16|i32|i64|u8|u16|u32|u64|isize|usize|f32|f64)\b/.test(c)) {
+    c = c.replace(/(\d[\d_]*)f(?:32|64)\b/g, '$1.0');
+    c = c.replace(/(\d[\d_]*)(?:i8|i16|i32|i64|u8|u16|u32|u64|isize|usize)\b/g, '$1');
+    ctx.converted.push('literal-suffix');
+  }
+
+  // `x as f32/f64` -> float(x); other casts are outside the subset.
+  if (/\bas\b/.test(c)) {
+    c = c.replace(/([A-Za-z0-9_\)\]]+)\s+as\s+f(?:32|64)\b/g, 'float($1)');
+    if (/\bas\b/.test(c)) {
+      ctx.unsupported.push(`as-cast: ${c.trim().slice(0, 50)}`);
+    } else {
+      ctx.converted.push('as-cast');
+    }
+  }
+
+  // Boolean literals.
+  if (/\b(?:true|false)\b/.test(c)) {
+    c = c.replace(/\btrue\b/g, 'True').replace(/\bfalse\b/g, 'False');
+    ctx.converted.push('boolean-literals');
+  }
+
+  // Logical operators.
+  if (/&&|\|\|/.test(c)) {
+    c = c.replace(/&&/g, ' and ').replace(/\|\|/g, ' or ');
+    ctx.converted.push('logical-operators');
+  }
+
+  // vec![...] -> list literal (must run before the `!` conversion).
+  while (/vec!\s*\[/.test(c)) {
+    const idx = c.search(/vec!\s*\[/);
+    const open = c.indexOf('[', idx);
+    const close = findMatchingBracket(c, open, '[', ']');
+    if (close < 0) {
+      ctx.unsupported.push(`vec-literal: ${c.trim().slice(0, 50)}`);
+      break;
+    }
+    const inner = c.slice(open + 1, close).trim();
+    const elems = inner === '' ? [] : splitTopLevel(inner, ',').map((el) => convertRustPyExpr(el, ctx));
+    c = c.slice(0, idx) + '[' + elems.join(', ') + ']' + c.slice(close + 1);
+    ctx.converted.push('vec-literal');
+  }
+
+  // `!` -> not, parenthesized so Python precedence cannot change meaning.
+  if (/!(?!=)/.test(c)) {
+    c = c.replace(/!(?!=)\s*(?=\()/g, 'not ');
+    c = c.replace(/!(?!=)\s*([A-Za-z_]\w*)/g, (_all: string, atom: string) => `(not ${atom})`);
+    if (/!(?!=)/.test(c)) {
+      ctx.unsupported.push(`not-operator: ${c.trim().slice(0, 50)}`);
+      c = c.replace(/!(?!=)/g, 'not ');
+    } else {
+      ctx.converted.push('not-operator');
+    }
+  }
+
+  // ---- constructs outside the subset: flagged, never silently converted ----
+  if (/::/.test(c)) ctx.unsupported.push(`path-or-turbofish: ${c.trim().slice(0, 50)}`);
+  if (/&/.test(c)) ctx.unsupported.push(`reference-operator: ${c.trim().slice(0, 50)}`);
+  if (/(?:^|[(,=]\s*)\*(?=\s*[A-Za-z_&(])/.test(c)) {
+    ctx.unsupported.push(`dereference: ${c.trim().slice(0, 50)}`);
+  }
+  if (/\?/.test(c)) ctx.unsupported.push(`try-operator: ${c.trim().slice(0, 50)}`);
+  if (/\|[^|]*\|/.test(c)) ctx.unsupported.push(`closure: ${c.trim().slice(0, 50)}`);
+  if (/\.\./.test(c)) ctx.unsupported.push(`range-operator: ${c.trim().slice(0, 50)}`);
+  if (/\bmatch\b/.test(c)) ctx.unsupported.push(`match-expression: ${c.trim().slice(0, 50)}`);
+  const method = c.match(/\.\s*[A-Za-z_]\w*\s*\(/);
+  if (method) ctx.unsupported.push(`method-call: ${method[0].trim()}`);
+  else if (/\.\s*[A-Za-z_]\w*\b/.test(c)) {
+    ctx.unsupported.push(`field-access: ${c.trim().slice(0, 50)}`);
+  }
+  if (/[{}]/.test(c)) ctx.unsupported.push(`struct-or-block-literal: ${c.trim().slice(0, 50)}`);
+  if (/\w!\s*[\(\[]/.test(c)) ctx.unsupported.push(`macro-call: ${c.trim().slice(0, 50)}`);
+  if (/\b(?:impl|struct|enum|trait|let|fn|mut|loop|use|where|dyn|async|unsafe|move|ref)\b/.test(c)) {
+    ctx.unsupported.push(`rust-keyword: ${c.trim().slice(0, 50)}`);
+  }
+  if (c.includes(';')) ctx.unsupported.push(`semicolon: ${c.trim().slice(0, 50)}`);
+
+  // Integer division semantics (Rust int/int truncates; Python needs //).
+  c = convertRustDivisions(c, ctx);
+
+  return c;
+}
+
+/** Convert a full expression (strings kept intact) to Python. */
+function convertRustPyExpr(expr: string, ctx: RustPyContext): string {
+  const segs = tokenizeRustExpr(expr);
+  let out = '';
+  for (const seg of segs) {
+    if (seg.kind === 'str') {
+      out += seg.text;
+      continue;
+    }
+    checkRustIdentifiers(seg.text, ctx);
+    out += convertRustPyCode(seg.text, ctx);
+  }
+  return out;
+}
+
+/** Remove string contents and trailing comments so leak scans do not match. */
+function stripPyForScan(line: string): string {
+  let out = '';
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '#') break;
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * Deterministic Rust -> Python structural transpiler (practical subset):
+ * fn main -> def main + __main__ guard, functions with types stripped,
+ * let/let mut -> assignments, println! -> print with f-strings (or
+ * .format when an argument is not f-string-safe), if/elif/else, for-range
+ * (.. and ..=), for-in, while, loop, break/continue, comments, raw
+ * strings, vec! -> list literals, boolean/logical operators with
+ * parenthesized `not`, and Rust integer-division semantics (int/int -> //).
+ *
+ * Everything else (match, impl, structs/enums/traits, ownership operators,
+ * lifetimes, closures, other macros, ?-operator, turbofish, use
+ * statements) is flagged in `unsupported` and emitted as comments —
+ * never leaked as live Python.
+ */
+export function rustToPython(source: string): StructuralTranspileResult {
+  const lines = source.split('\n');
+  const out: string[] = [];
+  const converted: string[] = [];
+  const unsupported: string[] = [];
+  const scopes: Array<Map<string, RustPyType>> = [];
+  const declaredFns = new Set<string>();
+  const fnReturns = new Map<string, RustPyType>();
+  const ctx: RustPyContext = { converted, unsupported, scopes, declaredFns, fnReturns };
+
+  // Open blocks; `filled` drives `pass` insertion for empty bodies.
+  const blocks: Array<{ filled: boolean; fnScope: boolean }> = [];
+  let consumeDepth = 0; // > 0 while an unsupported block construct is skipped
+  let sawMain = false;
+  let needsSys = false;
+
+  const pad = (depth: number) => ' '.repeat(4 * depth);
+  const curPad = () => pad(blocks.length);
+
+  const emit = (text: string) => {
+    out.push(text);
+    if (blocks.length > 0) blocks[blocks.length - 1].filled = true;
+  };
+  const pushBlock = (fnScope: boolean) => {
+    blocks.push({ filled: false, fnScope });
+    if (fnScope) scopes.push(new Map());
+  };
+  const closeBlock = () => {
+    const depth = blocks.length;
+    const blk = blocks.pop();
+    if (!blk) {
+      unsupported.push('unbalanced-brace');
+      return;
+    }
+    if (blk.fnScope) scopes.pop();
+    if (!blk.filled) out.push(`${pad(depth)}pass`);
+  };
+  /** Flag a whole block construct; its body is consumed as comments. */
+  const flagBlock = (kind: string, text: string) => {
+    unsupported.push(`${kind}: ${text.slice(0, 60)}`);
+    out.push(`${curPad()}# [unsupported: ${kind}] ${text}`);
+    consumeDepth = 1;
+  };
+  /** Flag a statement and comment it out; unbalanced braces enter consume mode. */
+  const flagStatement = (kind: string, code: string) => {
+    unsupported.push(`${kind}: ${code.slice(0, 60)}`);
+    out.push(`${curPad()}# [unsupported] ${code}`);
+    const nb = netBraces(code);
+    if (nb > 0) consumeDepth = nb;
+  };
+  const declareVar = (name: string, t: RustPyType) => {
+    if (scopes.length > 0) scopes[scopes.length - 1].set(name, t);
+  };
+  const lookupVar = (name: string): RustPyType | undefined => {
+    for (let i = scopes.length - 1; i >= 0; i--) {
+      const t = scopes[i].get(name);
+      if (t !== undefined) return t;
+    }
+    return undefined;
+  };
+  const before = () => ctx.unsupported.length;
+  const tryExpr = (expr: string): { code: string; ok: boolean } => {
+    const b = before();
+    const code = convertRustPyExpr(expr, ctx);
+    return { code, ok: ctx.unsupported.length === b };
+  };
+
+  // Pre-scan function signatures so forward references resolve.
+  for (const line of lines) {
+    const m = line.trim().match(/^fn\s+([A-Za-z_]\w*)\s*\((.*)\)\s*(?:->\s*(.+?)\s*)?\{$/);
+    if (m) {
+      declaredFns.add(m[1]);
+      if (m[3] !== undefined) fnReturns.set(m[1], mapRustPyType(m[3]));
+    }
+  }
+
+  for (const rawLine of lines) {
+    const raw = convertRustRawStrings(rawLine);
+    if (raw !== rawLine) converted.push('raw-string');
+    const trimmed = raw.trim();
+
+    // Inside an unsupported block construct: everything becomes a comment.
+    if (consumeDepth > 0) {
+      if (trimmed !== '') out.push(`${curPad()}    # [unsupported] ${trimmed}`);
+      else out.push('');
+      consumeDepth += netBraces(trimmed);
+      if (consumeDepth <= 0) consumeDepth = 0;
+      continue;
+    }
+
+    if (trimmed === '') {
+      out.push('');
+      continue;
+    }
+    if (trimmed.startsWith('//')) {
+      out.push(`${curPad()}# ${trimmed.replace(/^\/\/\s?/, '')}`);
+      converted.push('comment');
+      continue;
+    }
+
+    // ---- statements that are the same everywhere: attributes and use ----
+    if (/^#!?\[/.test(trimmed)) {
+      flagStatement('attribute', trimmed);
+      continue;
+    }
+    if (/^use\b/.test(trimmed)) {
+      flagStatement('use-statement', trimmed);
+      continue;
+    }
+
+    // ---- closers and else-continuations ----
+    if (/^\}\s*;?$/.test(trimmed)) {
+      closeBlock();
+      continue;
+    }
+    const elseIf = trimmed.match(/^(?:\}\s*)?else\s+if\s+(.+?)\s*\{$/);
+    if (elseIf) {
+      if (trimmed.startsWith('}')) closeBlock();
+      if (/\b(?:let|match)\b/.test(elseIf[1])) {
+        flagBlock('if-let', trimmed);
+        continue;
+      }
+      const r = tryExpr(elseIf[1]);
+      if (!r.ok) {
+        flagBlock('if-condition', trimmed);
+        continue;
+      }
+      emit(`${curPad()}elif ${r.code}:`);
+      pushBlock(false);
+      converted.push('elif');
+      continue;
+    }
+    if (/^(?:\}\s*)?else\s*\{$/.test(trimmed)) {
+      if (trimmed.startsWith('}')) closeBlock();
+      emit(`${curPad()}else:`);
+      pushBlock(false);
+      converted.push('else');
+      continue;
+    }
+
+    // ---- openers (lines ending with `{`) ----
+    if (/\{$/.test(trimmed)) {
+      // fn main
+      if (/^fn\s+main\s*\(\s*\)\s*\{$/.test(trimmed)) {
+        emit('def main():');
+        pushBlock(true);
+        sawMain = true;
+        declaredFns.add('main');
+        converted.push('fn-main');
+        continue;
+      }
+      if (/^fn\s+main\b/.test(trimmed)) {
+        flagBlock('main-signature', trimmed);
+        continue;
+      }
+      // generic fn with optional return type
+      const fnM = trimmed.match(/^fn\s+([A-Za-z_]\w*)\s*\((.*)\)\s*(?:->\s*(.+?)\s*)?\{$/);
+      if (fnM) {
+        const name = fnM[1];
+        const paramList = fnM[2].trim() === ''
+          ? []
+          : fnM[2].split(',').map((p) => p.trim()).filter(Boolean);
+        const names: string[] = [];
+        const types: RustPyType[] = [];
+        let ok = true;
+        for (const p of paramList) {
+          const pm = p.match(/^(?:mut\s+)?([A-Za-z_]\w*)\s*(?::\s*([\s\S]+))?$/);
+          if (!pm) {
+            unsupported.push(`function-parameter: ${p.slice(0, 50)}`);
+            ok = false;
+            break;
+          }
+          const pname = pm[1];
+          const rawType = pm[2] !== undefined ? pm[2] : '';
+          const rawTrim = rawType.trim();
+          const ptype: RustPyType = rawTrim ? mapRustPyType(rawTrim) : 'unknown';
+          if (rawTrim.startsWith('&') && !/^&\s*(?:mut\s+)?(?:str|String)$/.test(rawTrim)) {
+            unsupported.push(`reference-parameter: ${p.slice(0, 50)}`);
+          }
+          if (pname === 'self') unsupported.push(`self-parameter: ${p.slice(0, 50)}`);
+          names.push(pname);
+          types.push(ptype);
+        }
+        if (!ok) {
+          flagBlock('function-signature', trimmed);
+          continue;
+        }
+        declaredFns.add(name);
+        if (fnM[3] !== undefined) {
+          fnReturns.set(name, mapRustPyType(fnM[3]));
+          converted.push('fn-return-type-stripped');
+        }
+        emit(`${curPad()}def ${name}(${names.join(', ')}):`);
+        pushBlock(true);
+        for (let k = 0; k < names.length; k++) scopes[scopes.length - 1].set(names[k], types[k]);
+        converted.push('fn');
+        continue;
+      }
+      // if
+      const ifM = trimmed.match(/^if\s+(.+?)\s*\{$/);
+      if (ifM) {
+        if (/\b(?:let|match)\b/.test(ifM[1])) {
+          flagBlock('if-let', trimmed);
+          continue;
+        }
+        const r = tryExpr(ifM[1]);
+        if (!r.ok) {
+          flagBlock('if-condition', trimmed);
+          continue;
+        }
+        emit(`${curPad()}if ${r.code}:`);
+        pushBlock(false);
+        converted.push('if');
+        continue;
+      }
+      // while
+      const whileM = trimmed.match(/^while\s+(.+?)\s*\{$/);
+      if (whileM) {
+        if (/\blet\b/.test(whileM[1])) {
+          flagBlock('while-let', trimmed);
+          continue;
+        }
+        const r = tryExpr(whileM[1]);
+        if (!r.ok) {
+          flagBlock('while-condition', trimmed);
+          continue;
+        }
+        emit(`${curPad()}while ${r.code}:`);
+        pushBlock(false);
+        converted.push('while');
+        continue;
+      }
+      // loop
+      if (/^loop\s*\{$/.test(trimmed)) {
+        emit(`${curPad()}while True:`);
+        pushBlock(false);
+        converted.push('loop');
+        continue;
+      }
+      // for
+      const forM = trimmed.match(/^for\s+([A-Za-z_]\w*)\s+in\s+(.+?)\s*\{$/);
+      if (forM) {
+        const v = forM[1];
+        const iterRaw = forM[2];
+        const incl = iterRaw.match(/^(.+?)\.\.=(.+)$/);
+        const excl = incl ? null : iterRaw.match(/^(.+?)\.\.(.+)$/);
+        if (incl) {
+          const a = tryExpr(incl[1]);
+          const b = tryExpr(incl[2]);
+          if (!a.ok || !b.ok) {
+            flagBlock('for-range', trimmed);
+            continue;
+          }
+          const stop = /^-?\d+$/.test(b.code) ? String(parseInt(b.code, 10) + 1) : `(${b.code} + 1)`;
+          emit(`${curPad()}for ${v} in range(${a.code}, ${stop}):`);
+          declareVar(v, 'int');
+          converted.push('for-range-inclusive');
+        } else if (excl) {
+          const a = tryExpr(excl[1]);
+          const b = tryExpr(excl[2]);
+          if (!a.ok || !b.ok) {
+            flagBlock('for-range', trimmed);
+            continue;
+          }
+          emit(`${curPad()}for ${v} in range(${a.code}, ${b.code}):`);
+          declareVar(v, 'int');
+          converted.push('for-range');
+        } else {
+          const it = tryExpr(iterRaw);
+          if (!it.ok) {
+            flagBlock('for-iterable', trimmed);
+            continue;
+          }
+          emit(`${curPad()}for ${v} in ${it.code}:`);
+          declareVar(v, inferRustPyType(it.code, ctx));
+          converted.push('for-in');
+        }
+        pushBlock(false);
+        continue;
+      }
+      // type-definition blocks
+      if (/^(?:struct|enum|trait|mod|union)\b/.test(trimmed)) {
+        flagBlock(`${trimmed.split(/\s+/)[0]}-definition`, trimmed);
+        continue;
+      }
+      if (/^impl\b/.test(trimmed)) {
+        flagBlock('impl-block', trimmed);
+        continue;
+      }
+      if (/\bmatch\b/.test(trimmed)) {
+        flagBlock('match-expression', trimmed);
+        continue;
+      }
+      flagBlock('block-construct', trimmed);
+      continue;
+    }
+
+    // ---- statements ----
+    const { code: codeWithComment, comment } = stripLineComment(trimmed);
+    const code = codeWithComment.replace(/;+$/, '').trim();
+    const commentSuffix = comment ? `  # ${comment}` : '';
+    if (code === '') {
+      out.push(`${curPad()}# ${comment ?? ''}`.trimEnd());
+      continue;
+    }
+
+    // println! / print! / eprintln! / eprint!
+    const printM = code.match(/^(e?print(?:ln)?)!\s*\(([\s\S]*)\)$/);
+    if (printM) {
+      const kind = printM[1];
+      const inner = printM[2].trim();
+      const suffixParts: string[] = [];
+      if (kind === 'print' || kind === 'eprint') suffixParts.push('end=""');
+      if (kind.startsWith('e')) {
+        suffixParts.push('file=sys.stderr');
+        needsSys = true;
+      }
+      if (inner === '') {
+        emit(`${curPad()}print(${suffixParts.join(', ')})${commentSuffix}`);
+        converted.push('println');
+        continue;
+      }
+      const parts = splitTopLevel(inner, ',');
+      const fmtToken = parts[0].trim();
+      if (!/^"[\s\S]*"$/.test(fmtToken)) {
+        flagStatement('print-format', code);
+        continue;
+      }
+      const b0 = before();
+      const convArgs = parts.slice(1).map((a) => convertRustPyExpr(a, ctx));
+      if (ctx.unsupported.length > b0) {
+        flagStatement('println-argument', code);
+        continue;
+      }
+      // Walk the format string: {{ }} are literal braces, {} consumes the
+      // next argument, {N} is positional; anything else is unsupported.
+      const content = fmtToken.slice(1, -1);
+      let fBody = '';
+      let seq = 0;
+      const positional = new Set<number>();
+      let fmtOk = true;
+      let i = 0;
+      while (i < content.length) {
+        const ch = content[i];
+        if (ch === '\\' && i + 1 < content.length) {
+          fBody += content.slice(i, i + 2);
+          i += 2;
+          continue;
+        }
+        if (content.startsWith('{{', i)) {
+          fBody += '{{';
+          i += 2;
+          continue;
+        }
+        if (content.startsWith('}}', i)) {
+          fBody += '}}';
+          i += 2;
+          continue;
+        }
+        if (ch === '{') {
+          const close = content.indexOf('}', i);
+          if (close < 0) {
+            fmtOk = false;
+            break;
+          }
+          const spec = content.slice(i + 1, close).trim();
+          let arg: string | undefined;
+          if (spec === '') {
+            arg = convArgs[seq];
+            seq += 1;
+          } else if (/^\d+$/.test(spec)) {
+            const n = parseInt(spec, 10);
+            arg = convArgs[n];
+            positional.add(n);
+          }
+          if (arg === undefined) {
+            fmtOk = false;
+            break;
+          }
+          fBody += `{${arg}}`;
+          i = close + 1;
+          continue;
+        }
+        fBody += ch;
+        i += 1;
+      }
+      if (!fmtOk) {
+        flagStatement('println-format-spec', code);
+        continue;
+      }
+      // Every argument must be used, matching Rust behavior.
+      const used = new Set<number>(positional);
+      for (let k = 0; k < seq; k++) used.add(k);
+      for (let k = 0; k < convArgs.length; k++) {
+        if (!used.has(k)) {
+          unsupported.push(`println-unused-argument: ${parts[k + 1].trim().slice(0, 50)}`);
+        }
+      }
+      if (ctx.unsupported.length > b0) {
+        flagStatement('println-argument', code);
+        continue;
+      }
+      const hasPlaceholders = seq > 0 || positional.size > 0;
+      let argText: string;
+      if (!hasPlaceholders) {
+        argText = fmtToken;
+      } else if (convArgs.every((a) => !/["'{}\\:]/.test(a))) {
+        argText = `f"${fBody}"`;
+        converted.push('f-string');
+      } else {
+        argText = `${fmtToken}.format(${convArgs.join(', ')})`;
+        converted.push('format-string');
+      }
+      emit(`${curPad()}print(${[argText, ...suffixParts].filter((s) => s !== '').join(', ')})${commentSuffix}`);
+      converted.push('println');
+      continue;
+    }
+
+    // single-line match
+    if (/\bmatch\b/.test(code)) {
+      flagStatement('match-expression', code);
+      continue;
+    }
+
+    // let / let mut
+    const letM = code.match(/^let\s+(mut\s+)?([A-Za-z_]\w*)\s*(?::\s*([^=;]+?))?\s*=\s*([\s\S]+)$/);
+    if (letM) {
+      const isMut = letM[1] !== undefined;
+      const name = letM[2];
+      const typeAnn = letM[3] !== undefined ? letM[3].trim() : '';
+      const b1 = before();
+      const value = convertRustPyExpr(letM[4], ctx);
+      if (ctx.unsupported.length > b1) {
+        flagStatement('let-expression', code);
+        continue;
+      }
+      const t = typeAnn ? mapRustPyType(typeAnn) : inferRustPyType(value, ctx);
+      if (typeAnn) converted.push('let-type-annotation-stripped');
+      declareVar(name, t);
+      emit(`${curPad()}${name} = ${value}${commentSuffix}`);
+      converted.push('let');
+      if (isMut) converted.push('let-mut');
+      continue;
+    }
+    if (/^let\b/.test(code)) {
+      flagStatement('let-declaration', code);
+      continue;
+    }
+
+    // return
+    if (/^return\b/.test(code)) {
+      const val = code.replace(/^return\b/, '').trim();
+      if (val === '') {
+        emit(`${curPad()}return None${commentSuffix}`);
+        converted.push('return');
+        continue;
+      }
+      const b2 = before();
+      const conv = convertRustPyExpr(val, ctx);
+      if (ctx.unsupported.length > b2) {
+        flagStatement('return', code);
+        continue;
+      }
+      emit(`${curPad()}return ${conv}${commentSuffix}`);
+      converted.push('return');
+      continue;
+    }
+
+    // break / continue
+    if (code === 'break' || code === 'continue') {
+      emit(`${curPad()}${code}${commentSuffix}`);
+      converted.push('break-continue');
+      continue;
+    }
+    if (/^(?:break|continue)\b/.test(code)) {
+      flagStatement('labeled-or-valued-break', code);
+      continue;
+    }
+
+    // tuple assignment (destructuring) is outside the subset
+    if (/^[A-Za-z_]\w*\s*,/.test(code)) {
+      flagStatement('tuple-assignment', code);
+      continue;
+    }
+
+    // assignments (plain and compound)
+    const assignM = code.match(/^([A-Za-z_]\w*(?:\[[^\]\[]*\])?)\s*(\+=|-=|\*=|\/=|%=|=)\s*([\s\S]+)$/);
+    if (assignM && !(assignM[2] === '=' && assignM[3].startsWith('='))) {
+      const target = assignM[1];
+      const base = target.replace(/\[[^\]\[]*\]$/, '');
+      if (lookupVar(base) === undefined) {
+        unsupported.push(`undeclared-assignment: ${base}`);
+        flagStatement('assignment', code);
+        continue;
+      }
+      const b3 = before();
+      const value = convertRustPyExpr(assignM[3], ctx);
+      let op = assignM[2];
+      if (op === '/=') {
+        const t0 = lookupVar(base);
+        const t1 = inferRustPyType(value, ctx);
+        if (t0 === 'int' && t1 === 'int') {
+          op = '//=';
+          converted.push('integer-division');
+        } else if (t0 !== 'int' && t0 !== 'float') {
+          unsupported.push(`ambiguous-division: ${code.slice(0, 50)}`);
+        }
+      }
+      if (ctx.unsupported.length > b3) {
+        flagStatement('assignment', code);
+        continue;
+      }
+      emit(`${curPad()}${target} ${op} ${value}${commentSuffix}`);
+      converted.push(op === '=' ? 'assignment' : 'compound-assignment');
+      continue;
+    }
+
+    // any other macro
+    if (/\w!\s*[\(\[]/.test(code)) {
+      flagStatement('macro-call', code);
+      continue;
+    }
+    // brace-less or inline control flow is outside the subset
+    if (/^(?:if|else|for|while|loop|match|fn|impl|struct|enum|trait|pub|unsafe)\b/.test(code)) {
+      flagStatement('brace-less-or-inline-construct', code);
+      continue;
+    }
+
+    // bare expression statements (calls, etc.)
+    const b4 = before();
+    const conv = convertRustPyExpr(code, ctx);
+    if (ctx.unsupported.length > b4) {
+      flagStatement('expression', code);
+      continue;
+    }
+    emit(`${curPad()}${conv}${commentSuffix}`);
+    converted.push('expression-statement');
+  }
+
+  // Close any blocks left open at EOF
+  while (blocks.length > 0) closeBlock();
+
+  // Rust runs fn main; Python needs the __main__ guard to call it.
+  if (sawMain) {
+    out.push('', 'if __name__ == "__main__":', '    main()');
+    converted.push('main-guard');
+  }
+  if (needsSys) out.unshift('import sys', '');
+
+  // Leak scan: any Rust-ism that survived conversion is reported, never
+  // silently emitted as if it were valid Python.
+  for (const emitted of out) {
+    const t = emitted.trim();
+    if (!t || t.startsWith('#')) continue;
+    const m = stripPyForScan(emitted).match(RUST_PY_LEAK);
+    if (m) {
+      unsupported.push(`unconverted rust syntax "${m[0]}" in: ${t.slice(0, 60)}`);
+    }
+  }
+
+  return {
+    code: out.join('\n'),
     converted: Array.from(new Set(converted)),
     unsupported: Array.from(new Set(unsupported)),
   };

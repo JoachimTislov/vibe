@@ -3,7 +3,8 @@
  *
  * Routes a transpile request (source, from, to) through three tiers:
  *   1. Native transpilers bundled with toolchains (TS->JS via tsc API...)
- *   2. Deterministic structural transpilers (Rust->Go, Haskell->JS...)
+ *   2. Deterministic structural transpilers (Rust->Go, Rust->Python,
+ *      Haskell->JS...)
  *   3. AI/dynamic compiler generation (LLM-based CompilerGenerator)
  *
  * The first tier that handles the pair wins, so results are deterministic
@@ -18,6 +19,7 @@ import {
   jsToPython,
   pythonToJavaScript,
   rustToGo,
+  rustToPython,
   type StructuralTranspileResult,
 } from './structural-transpilers';
 
@@ -40,6 +42,12 @@ export interface MatrixTranspileResult {
 const STRUCTURAL_PAIRS: Record<string, (source: string) => StructuralTranspileResult> = {
   'rust->go': rustToGo,
   'rust->golang': rustToGo,
+  // Rust -> Python: deterministic structural converter (practical subset);
+  // unsupported constructs are flagged in the structural report.
+  'rust->python': rustToPython,
+  'rust->py': rustToPython,
+  'rs->python': rustToPython,
+  'rs->py': rustToPython,
   'haskell->javascript': haskellToJavaScript,
   'haskell->js': haskellToJavaScript,
   'python->javascript': pythonToJavaScript,

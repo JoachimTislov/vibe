@@ -657,6 +657,25 @@ describe('Engine analysis and project detection', () => {
     expect(build.result.ok).toBe(true);
   }, 300_000);
 
+  it('runs a Go source on the JVM via the structural go->java pair (platform decides the output)', async () => {
+    const go = registry.get('go')!;
+    const java = registry.get('java')!;
+    if (!go.info.available || !java.info.available) {
+      return console.warn('skipping: go or java unavailable');
+    }
+
+    const report = await engine.run(
+      'package main\n\nimport "fmt"\n\nfunc main() {\n\ttotal := 0\n\tfor i := 0; i < 10; i++ {\n\t\ttotal = total + i\n\t}\n\tfmt.Println("go-on-jvm says:", total)\n}\n',
+      { language: 'go', platform: 'jvm' }
+    );
+    expect(report.route).toBe('transpile-then-run');
+    expect(report.executedLanguage).toBe('java');
+    expect(report.transpilation?.strategy).toBe('structural');
+    expect(report.transpilation?.via).toBe('go->java');
+    expect(report.result.ok).toBe(true);
+    expect(report.result.stdout.trim()).toBe('go-on-jvm says: 45');
+  }, 180_000);
+
   it('refuses to build unrecognized project directories', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proj-empty-'));
     await expect(engine.build(dir)).rejects.toThrow(/No recognizable project/i);

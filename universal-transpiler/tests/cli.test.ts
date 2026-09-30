@@ -80,6 +80,33 @@ function greet(g: Greet): string {
 greet({ name: "world" });
 `;
 
+const WEEKLY_DSL = `workflow food-tracking "Weekly groceries" {
+    reference-date 2026-10-01
+    horizon 7 days
+
+    collection pantry "Pantry" {
+        product Milk (dairy): 2 expiring 2026-10-04, 1 expired 2026-09-28
+        product Pasta (dry goods): 4 non-expiring
+        product Bananas (produce): 6 expiring 2026-10-03
+    }
+
+    consume Milk at 1 per day
+    consume Pasta at 0.5 per day
+    consume Bananas at 1 per day
+
+    meal 2026-10-02 "Carbonara" needs Pasta x2, Milk x1
+}
+
+rules {
+    exclude expired stock
+}
+`;
+
+const BROKEN_DSL = `workflow food-tracking "Broken" {
+    reference-date not-a-date
+}
+`;
+
 function fixture(name: string, content: string): string {
   const p = path.join(workDir, name);
   fs.writeFileSync(p, content);
@@ -118,6 +145,8 @@ beforeAll(async () => {
   fixture('hello.ts', HELLO_TS);
   fixture('fail.ts', FAIL_TS);
   fixture('sample.ts', SAMPLE_TS);
+  fixture('weekly.dsl', WEEKLY_DSL);
+  fixture('broken.dsl', BROKEN_DSL);
 
   const goProject = path.join(workDir, 'goproject');
   fs.mkdirSync(goProject);
@@ -451,5 +480,88 @@ describe('CLI demo recipes', () => {
     const r = await cli(['demo', 'recipes', '--target', 'cobol', '--state', statePath]);
     expect(r.code).not.toBe(0);
     expect(r.stderr).toContain('unknown demo target');
+  }, 60_000);
+});
+
+describe('CLI workflow', () => {
+  it('runs a workflow DSL document and prints the shopping list and waste alerts', async () => {
+    const r = await cli(['workflow', path.join(workDir, 'weekly.dsl'), '--state', statePath]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('workflow: Weekly groceries (domain food-tracking, reference 2026-10-01, horizon 7 days)');
+    // Expired milk is excluded by the rules block: 7 needed - 2 usable = 5 to buy
+    expect(r.stdout).toContain('product=Milk toBuy=5 usableStock=2 needed=7 category=dairy');
+    expect(r.stdout).toContain('product=Bananas toBuy=1 usableStock=6 needed=7 category=produce');
+    expect(r.stdout).toContain('product=Pasta toBuy=0 usableStock=4 needed=3.5 category=dry goods');
+    expect(r.stdout).toContain('product=Bananas quantity=6 daysUntilExpiry=2');
+    expect(r.stdout).toContain('product=Milk quantity=2 daysUntilExpiry=3');
+  }, 60_000);
+
+  it('prints domain, title, spec and result with --json', async () => {
+    const r = await cli(['workflow', path.join(workDir, 'weekly.dsl'), '--json', '--state', statePath]);
+    expect(r.code).toBe(0);
+    const payload = JSON.parse(r.stdout);
+
+    expect(payload.domain).toBe('food-tracking');
+    expect(payload.title).toBe('Weekly groceries');
+    expect(payload.spec.domain).toBe('food-tracking');
+    expect(payload.spec.referenceDate).toBe('2026-10-01');
+    expect(payload.spec.horizonDays).toBe(7);
+    expect(payload.spec.collections[0].products).toHaveLength(3);
+    expect(payload.spec.mealPlan[0].name).toBe('Carbonara');
+
+    const milk = payload.result.shoppingList.find((i: any) => i.product === 'Milk');
+    expect(milk).toMatchObject({ toBuy: 5, usableStock: 2, needed: 7 });
+    expect(payload.result.wasteAlerts).toHaveLength(2);
+  }, 60_000);
+
+  it('generates and executes the document through the js target', async () => {
+    const r = await cli([
+      'workflow',
+      path.join(workDir, 'weekly.dsl'),
+      '--target',
+      'js',
+      '--state',
+      statePath,
+    ]);
+    expect(r.code).toBe(0);
+    // Reference workflow output (human-readable) ...
+    expect(r.stdout).toContain('product=Milk toBuy=5');
+    // ... followed by the generated program's output through the engine
+    expect(r.stdout).toContain('"toBuy": 5');
+    expect(r.stderr).toContain('route: native-run');
+  }, 120_000);
+
+  it('includes the execution report in --json output when --target is given', async () => {
+    const r = await cli([
+      'workflow',
+      path.join(workDir, 'weekly.dsl'),
+      '--json',
+      '--target',
+      'js',
+      '--state',
+      statePath,
+    ]);
+    expect(r.code).toBe(0);
+    const payload = JSON.parse(r.stdout);
+    expect(payload.domain).toBe('food-tracking');
+    expect(payload.result.shoppingList).toHaveLength(3);
+    expect(payload.execution).toMatchObject({
+      target: 'javascript',
+      route: 'native-run',
+      ok: true,
+    });
+  }, 120_000);
+
+  it('reports a syntax error as file:line with exit code 1 and no stack trace', async () => {
+    const r = await cli(['workflow', path.join(workDir, 'broken.dsl'), '--state', statePath]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/broken\.dsl:2: invalid ISO date "not-a-date"/);
+    expect(r.stderr).not.toMatch(/\n\s+at /);
+  }, 60_000);
+
+  it('requires a document argument', async () => {
+    const r = await cli(['workflow']);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain('workflow requires');
   }, 60_000);
 });
