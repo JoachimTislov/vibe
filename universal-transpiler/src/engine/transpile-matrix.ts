@@ -13,6 +13,7 @@
 import type { ToolchainRegistry } from '../toolchains/registry';
 import type { LLMClient } from '../core/universal-transpiler';
 import {
+  goToJava,
   haskellToJavaScript,
   jsToPython,
   pythonToJavaScript,
@@ -53,6 +54,11 @@ const STRUCTURAL_PAIRS: Record<string, (source: string) => StructuralTranspileRe
   'ts->python': jsToPython,
   'typescript->py': jsToPython,
   'ts->py': jsToPython,
+  // Go -> Java: deterministic structural converter (practical subset);
+  // unsupported constructs are flagged in the structural report.
+  'go->java': goToJava,
+  'go->jvm': goToJava,
+  'golang->java': goToJava,
 };
 
 export class TranspileMatrix {

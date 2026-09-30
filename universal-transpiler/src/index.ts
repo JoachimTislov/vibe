@@ -132,6 +132,7 @@ export * from './frameworks/framework-registry';
 
 export * from './domains/domain-analyzer';
 export * from './domains/foodsavr';
+export * from './domains/workflow-dsl';
 
 // ============================================================================
 // Engine Exports (the universal wrapper facade)

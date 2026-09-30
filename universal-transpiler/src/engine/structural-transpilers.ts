@@ -14,6 +14,11 @@
  *   if/elif/else, for-range/for-of/for-in, while, template literals ->
  *   f-strings, let/const/var, booleans/null, and/or/not, .length -> len(),
  *   object literals -> dicts, comments, returns)
+ * - go -> java (package main, functions, var/short declarations, type
+ *   mapping, fmt.Println space-joined printing, if/else, c-style for /
+ *   for-cond / for-range, comments; goroutines, channels, defer, structs,
+ *   interfaces, multiple returns, slice/map literals and closures are
+ *   flagged as comments, never leaked as live Java)
  *
  * TypeScript input is lowered to JavaScript first by the native TS->JS step
  * (typescript compiler API) in the transpile matrix; jsToPython then runs
@@ -1753,6 +1758,806 @@ export function jsToPython(source: string): StructuralTranspileResult {
 
   return {
     code: out.join('\n'),
+    converted: Array.from(new Set(converted)),
+    unsupported: Array.from(new Set(unsupported)),
+  };
+}
+
+// ============================================================================
+// Go -> Java
+// ============================================================================
+
+const GO_TO_JAVA_TYPES: Record<string, string> = {
+  int: 'int',
+  int64: 'long',
+  float64: 'double',
+  string: 'String',
+  bool: 'boolean',
+  rune: 'char',
+};
+
+/**
+ * Go-isms that must never survive into live Java. The final leak scan and
+ * every statement-level conversion both use this: if anything matches, the
+ * line is reported as unsupported and emitted as a comment instead.
+ */
+const GO_JAVA_LEAK =
+  /:=|\bfmt\.\w|\bfunc\b|\bpackage\b|\bimport\b|<-|\bchan\b|\bdefer\b|\bgo\s+\w|\brange\b|\bnil\b|\bappend\(|\bmake\(|\bstruct\b|\binterface\b|\btype\b|\bswitch\b|\bselect\b|\bpanic\b|\bgoto\b|\bmap\[|\bstrconv\.|\bstrings\.|\bos\.|\btime\.|\bmath\.|\bsort\.|\berrors\.|\bsync\.|`|\[[^\]\[]*:[^\]\[]*\]|\}\s*\(/;
+
+/** Identifiers mapGoExpr must not flag (Java keywords it can emit itself). */
+const GO_JAVA_IDENT_SKIP = new Set([
+  'int', 'long', 'double', 'float', 'boolean', 'char', 'byte', 'short',
+  'String', 'void', 'new', 'true', 'false', 'null', 'length', 'args',
+]);
+
+/** Shared collector for the Go -> Java conversion helpers. */
+interface GoJavaContext {
+  /** function name -> mapped Java return type */
+  fnTypes: Map<string, string>;
+  /** variable name -> mapped Java type (approximate lexical scope) */
+  varTypes: Map<string, string>;
+  converted: string[];
+  unsupported: string[];
+}
+
+/** Map a Go type to its Java counterpart; null when outside the subset. */
+function mapGoType(goType: string): string | null {
+  const t = goType.trim();
+  const arr = t.match(/^\[\d*\](.+)$/); // [3]int (array) / []int (slice)
+  if (arr) {
+    const el = mapGoType(arr[1]);
+    return el ? `${el}[]` : null;
+  }
+  if (t.startsWith('[')) return null; // map[K]V, [N]T literals, etc.
+  return GO_TO_JAVA_TYPES[t] ?? null;
+}
+
+/** Split a Go parameter list into Java parameters; null when unsupported. */
+function mapGoParams(paramList: string, ctx: GoJavaContext): string[] | null {
+  const parts = paramList.trim() === '' ? [] : splitTopLevel(paramList, ',');
+  const outParams: string[] = [];
+  const pending: string[] = [];
+  for (const part of parts) {
+    const m = part.match(/^([A-Za-z_]\w*)\s+(.+)$/);
+    if (m) {
+      // Go groups params: "a, b int" - pending names share the type
+      const jt = mapGoType(m[2]);
+      if (!jt) {
+        ctx.unsupported.push(`unsupported-type: ${m[2].trim()}`);
+        return null;
+      }
+      for (const name of [...pending, m[1]]) outParams.push(`${jt} ${name}`);
+      pending.length = 0;
+      continue;
+    }
+    if (/^[A-Za-z_]\w*$/.test(part)) {
+      pending.push(part);
+      continue;
+    }
+    return null;
+  }
+  if (pending.length > 0) return null;
+  return outParams;
+}
+
+/** Infer the Java type of a Go expression; null when it cannot be determined. */
+function inferGoType(expr: string, ctx: GoJavaContext): string | null {
+  let e = expr.trim();
+  while (e.startsWith('(') && balancedInner(e, '(', ')') !== null) {
+    e = e.slice(1, -1).trim();
+  }
+  if (e === '') return null;
+  if (e.startsWith('"')) return 'String';
+  if (/^'(?:\\.|[^\\'])'$/.test(e)) return 'char';
+  if (e === 'true' || e === 'false') return 'boolean';
+  if (/^-?\d+$/.test(e)) return 'int';
+  if (/^-?\d+\.\d/.test(e)) return 'double';
+  if (e.startsWith('[')) return null; // slice/map/array literals: never inferred
+  const call = e.match(/^([A-Za-z_]\w*)\s*\(.*\)$/);
+  if (call) {
+    if (call[1] === 'int') return 'int';
+    if (call[1] === 'int64') return 'long';
+    if (call[1] === 'float64') return 'double';
+    if (call[1] === 'rune') return 'char';
+    return ctx.fnTypes.get(call[1]) ?? null;
+  }
+  if (/^[A-Za-z_]\w*$/.test(e)) return ctx.varTypes.get(e) ?? null;
+  if (/[<>]=?|==|!=|&&|\|\||^!\s*/.test(e)) return 'boolean';
+  if (e.includes('"') || e.includes('`')) return 'String';
+  if (/\d\.\d/.test(e)) return 'double';
+  if (/^-?[\d\s+\-*/%()&|^<>=!]+$/.test(e)) return 'int';
+  return null;
+}
+
+/**
+ * Convert a Go expression to Java and honestly flag what the subset cannot
+ * express: unknown function calls and undeclared identifiers (variables
+ * whose declaration was flagged) are pushed to ctx.unsupported so callers
+ * can demote the whole statement to a comment.
+ */
+function mapGoExpr(expr: string, ctx: GoJavaContext): string {
+  let e = expr.trim();
+  // len(x) -> x.length (simple identifier argument)
+  e = e.replace(/\blen\(\s*([A-Za-z_]\w*)\s*\)/g, (_all: string, name: string) => `${name}.length`);
+  // numeric casts
+  e = e.replace(/\bint\(/g, '(int) (').replace(/\bint64\(/g, '(long) (');
+  e = e.replace(/\bfloat64\(/g, '(double) (').replace(/\brune\(/g, '(char) (');
+  // whole-slice expression x[:] -> x (Java arrays are the slice carrier)
+  e = e.replace(/\b([A-Za-z_]\w*)\s*\[:\]/g, (_all: string, name: string) => name);
+
+  const stripped = stripStringsForScan(e);
+  // unknown calls: only transpiled functions (fnTypes) and builtins may run
+  for (const m of stripped.matchAll(/\b([A-Za-z_]\w*)\s*\(/g)) {
+    if (['len', 'int', 'int64', 'float64', 'rune'].includes(m[1])) continue;
+    if (!ctx.fnTypes.has(m[1])) ctx.unsupported.push(`unknown-function-call: ${m[1]}`);
+  }
+  // undeclared identifiers: never let a flagged declaration be used silently
+  for (const m of stripped.matchAll(/\b([A-Za-z_]\w*)\b/g)) {
+    const name = m[1];
+    if (GO_JAVA_IDENT_SKIP.has(name)) continue;
+    const idx = m.index ?? 0;
+    if (idx > 0 && stripped.slice(0, idx).trimEnd().endsWith('.')) continue;
+    if (ctx.fnTypes.has(name) || ctx.varTypes.has(name)) continue;
+    ctx.unsupported.push(`undeclared-variable: ${name}`);
+  }
+  return e;
+}
+
+/**
+ * Deterministic Go -> Java structural transpiler (practical subset).
+ *
+ * package main -> public class Main with public static void main; funcs ->
+ * static methods; := / var / const -> typed declarations; fmt.Println ->
+ * System.out.println with Go-style space-joined arguments; if/else,
+ * c-style for, for-cond, for-range -> Java equivalents; fixed-size array
+ * literals -> new T[]{...}. Goroutines, channels, defer, structs,
+ * interfaces, methods with receivers, multiple return values, slice/map
+ * literals, closures and anything the subset cannot express are flagged in
+ * `unsupported` and emitted as comments - never as live Java.
+ */
+export function goToJava(source: string): StructuralTranspileResult {
+  const lines = source.split('\n');
+  const out: string[] = [];
+  const converted: string[] = [];
+  const unsupported: string[] = [];
+  const fnTypes = new Map<string, string>();
+  const varTypes = new Map<string, string>();
+  const ctx: GoJavaContext = { fnTypes, varTypes, converted, unsupported };
+  const INDENT = '    ';
+
+  // Pre-scan all function signatures: Go allows calls before declaration.
+  // A signature only becomes "known" when its parameters map as well, so a
+  // function whose conversion was flagged can never be called silently.
+  const probeCtx: GoJavaContext = { fnTypes, varTypes, converted: [], unsupported: [] };
+  for (const raw of lines) {
+    const t = raw.trim();
+    if (/^func\s*\(/.test(t)) continue; // method receiver: out of subset
+    const m = t.match(/^func\s+([A-Za-z_]\w*)\s*\(([^()]*)\)\s*(.*?)\s*\{$/);
+    if (!m) continue;
+    if (mapGoParams(m[2], probeCtx) === null) continue;
+    let ret = m[3].trim();
+    if (ret.startsWith('(') && ret.endsWith(')')) ret = ret.slice(1, -1).trim();
+    if (ret.includes(',')) continue; // multiple return values: unsupported
+    if (ret === '') {
+      fnTypes.set(m[1], 'void');
+      continue;
+    }
+    const jt = mapGoType(ret);
+    if (jt) fnTypes.set(m[1], jt);
+  }
+
+  // Lexical context: every open block contributes +1 to depth; a context
+  // pops when depth returns to the value it was opened at.
+  let depth = 0;
+  const stack: Array<{
+    kind: 'fn' | 'flagged';
+    depth: number;
+    params: string[];
+    savedVars?: Map<string, string>;
+  }> = [];
+  const innermost = () => (stack.length ? stack[stack.length - 1].kind : null);
+
+  const leak = (text: string): string | null => {
+    const m = stripStringsForScan(text).match(GO_JAVA_LEAK);
+    return m ? m[0] : null;
+  };
+
+  const popContexts = () => {
+    while (stack.length > 0 && depth === stack[stack.length - 1].depth) {
+      const popped = stack.pop()!;
+      if (popped.savedVars) {
+        varTypes.clear();
+        for (const [k, v] of popped.savedVars) varTypes.set(k, v);
+      }
+      for (const p of popped.params) varTypes.delete(p);
+    }
+  };
+
+  /** Flag a line and comment it out; opens a flagged context for blocks. */
+  const flagLine = (raw: string): void => {
+    const t = raw.trim();
+    const pad = raw.slice(0, raw.length - raw.trimStart().length);
+    out.push(`${pad}// [unsupported] ${t}`);
+    const nb = netBraces(raw);
+    depth += nb;
+    if (nb > 0) stack.push({ kind: 'flagged', depth: depth - nb, params: [] });
+    popContexts();
+  };
+
+  /** Emit `line` unless it leaks Go-isms or gained unsupported flags. */
+  const emitChecked = (
+    line: string,
+    raw: string,
+    before: number,
+    fallbackTag: string
+  ): boolean => {
+    const leakMatch = leak(line);
+    if (unsupported.length === before && leakMatch === null) {
+      out.push(line);
+      return true;
+    }
+    if (leakMatch !== null) {
+      unsupported.push(`${fallbackTag}: ${raw.trim().slice(0, 50)}`);
+    }
+    flagLine(raw);
+    return false;
+  };
+
+  /**
+   * Convert a declaration ("x := e", "x T = e", "var x T", "x = e", with an
+   * optional var/const prefix already stripped by the caller for the latter
+   * forms). Returns the Java statement or null after flagging the reason.
+   */
+  const convertDecl = (stmt: string, isConst: boolean): string | null => {
+    const assign = stmt.match(/^(?:var\s+|const\s+)?([A-Za-z_]\w*)\s*:=\s*(.+)$/);
+    if (assign) {
+      const name = assign[1];
+      let rhs = mapGoExpr(assign[2], ctx);
+      if (/\bfunc\s*\(/.test(rhs)) {
+        unsupported.push('closure');
+        return null;
+      }
+      if (/\bmake\(/.test(rhs)) {
+        unsupported.push('make');
+        return null;
+      }
+      if (/\bappend\(/.test(rhs)) {
+        unsupported.push('append');
+        return null;
+      }
+      if (rhs.includes('<-') || /\bchan\b/.test(rhs)) {
+        unsupported.push('channel');
+        return null;
+      }
+      // fixed-size array literal [N]T{...} -> new T[]{...}
+      const arr = rhs.match(/^\[(\d+)\]\s*([A-Za-z_]\w*)\s*\{(.*)\}$/);
+      if (arr) {
+        const el = mapGoType(arr[2]);
+        if (!el) {
+          unsupported.push(`unsupported-type: ${arr[2]}`);
+          return null;
+        }
+        varTypes.set(name, `${el}[]`);
+        converted.push('array-literal');
+        return `${el}[] ${name} = new ${el}[]{${arr[3]}};`;
+      }
+      if (/^\[\]/.test(rhs)) {
+        unsupported.push('slice-literal');
+        return null;
+      }
+      if (/^map\[/.test(rhs)) {
+        unsupported.push('map-literal');
+        return null;
+      }
+      const structLit = rhs.match(/^[A-Za-z_]\w*\{.*\}$/);
+      if (structLit) {
+        unsupported.push('struct-literal');
+        return null;
+      }
+      const type = inferGoType(rhs, ctx);
+      if (!type) {
+        unsupported.push(`declaration-type-inference: ${stmt.slice(0, 50)}`);
+        return null;
+      }
+      varTypes.set(name, type);
+      converted.push('short-decl');
+      return `${type} ${name} = ${rhs};`;
+    }
+
+    const rest = stmt.replace(/^(?:var\s+|const\s+)/, '');
+    if (rest.split('=')[0].includes(',')) {
+      unsupported.push('multi-var-declaration');
+      return null;
+    }
+    const vd = rest.match(/^([A-Za-z_]\w*)\s+([^=]+?)\s*(?:=\s*(.+))?$/);
+    if (vd) {
+      const jt = mapGoType(vd[2].trim());
+      if (!jt) {
+        unsupported.push(`unsupported-type: ${vd[2].trim()}`);
+        return null;
+      }
+      const name = vd[1];
+      varTypes.set(name, jt);
+      if (vd[3] !== undefined) {
+        converted.push('var-decl');
+        return `${isConst ? 'final ' : ''}${jt} ${name} = ${mapGoExpr(vd[3], ctx)};`;
+      }
+      // zero value
+      const zero: Record<string, string> = {
+        int: '0', long: '0', double: '0.0', boolean: 'false',
+        char: "'\\u0000'", String: '""',
+      };
+      converted.push('var-decl-zero');
+      return `${isConst ? 'final ' : ''}${jt} ${name} = ${zero[jt] ?? 'null'};`;
+    }
+    const plain = rest.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
+    if (plain) {
+      const type = inferGoType(plain[2], ctx);
+      if (!type) {
+        unsupported.push(`declaration-type-inference: ${stmt.slice(0, 50)}`);
+        return null;
+      }
+      varTypes.set(plain[1], type);
+      converted.push('var-decl');
+      return `${isConst ? 'final ' : ''}${type} ${plain[1]} = ${mapGoExpr(plain[2], ctx)};`;
+    }
+    unsupported.push(`declaration: ${stmt.slice(0, 50)}`);
+    return null;
+  };
+
+  let inImportBlock = false;
+
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+    const pad = raw.slice(0, raw.length - raw.trimStart().length);
+
+    // Blank lines and comments pass through
+    if (trimmed === '') {
+      out.push('');
+      continue;
+    }
+    if (trimmed.startsWith('//') || trimmed.startsWith('/*')) {
+      out.push(raw);
+      continue;
+    }
+
+    // Multi-line import block
+    if (inImportBlock) {
+      if (trimmed === ')') {
+        inImportBlock = false;
+        converted.push('import-dropped');
+      }
+      continue;
+    }
+    if (/^import\s*\(/.test(trimmed)) {
+      inImportBlock = true;
+      continue;
+    }
+
+    // Inside a flagged construct: everything is commented out. Specific
+    // unsupported constructs still get their tag for the report.
+    if (innermost() === 'flagged') {
+      if (/^defer\b/.test(trimmed)) unsupported.push('defer');
+      else if (/^go\s+\S/.test(trimmed)) unsupported.push('goroutine');
+      else if (trimmed.includes('<-') || /\bchan\b/.test(trimmed)) unsupported.push('channel');
+      out.push(`${pad}// [unsupported] ${trimmed}`);
+      depth += netBraces(raw);
+      popContexts();
+      continue;
+    }
+
+    // Closing brace: pops the innermost context at its boundary
+    if (trimmed === '}') {
+      depth -= 1;
+      popContexts();
+      out.push(raw);
+      continue;
+    }
+
+    // ------------------------------------------------------------------
+    // Top level (class members)
+    // ------------------------------------------------------------------
+    if (stack.length === 0) {
+      const pkg = trimmed.match(/^package\s+([\w.]+)\s*$/);
+      if (pkg) {
+        if (pkg[1] === 'main') {
+          converted.push('package-main');
+        } else {
+          unsupported.push(`non-main-package: ${pkg[1]}`);
+          out.push(`// [unsupported: package ${pkg[1]}]`);
+        }
+        continue;
+      }
+      if (/^import\s/.test(trimmed)) {
+        converted.push('import-dropped');
+        continue;
+      }
+
+      if (/^func\s/.test(trimmed)) {
+        if (/^func\s*\(/.test(trimmed)) {
+          unsupported.push('method-receiver');
+          flagLine(raw);
+          continue;
+        }
+        if (/^func\s+main\s*\(\s*\)\s*\{$/.test(trimmed)) {
+          out.push(`${INDENT}public static void main(String[] args) {`);
+          varTypes.set('args', 'String[]');
+          stack.push({ kind: 'fn', depth, params: ['args'], savedVars: new Map(varTypes) });
+          depth += 1;
+          converted.push('func-main');
+          continue;
+        }
+        const fm = trimmed.match(/^func\s+([A-Za-z_]\w*)\s*\(([^()]*)\)\s*(.*?)\s*\{$/);
+        if (!fm) {
+          unsupported.push(`func-declaration: ${trimmed.slice(0, 50)}`);
+          flagLine(raw);
+          continue;
+        }
+        const before = unsupported.length;
+        const params = mapGoParams(fm[2], ctx);
+        let ret = fm[3].trim();
+        if (ret.startsWith('(') && ret.endsWith(')')) ret = ret.slice(1, -1).trim();
+        const multi = ret.includes(',');
+        const retJava = ret === '' ? 'void' : mapGoType(ret);
+        if (params === null || multi || !retJava) {
+          if (multi) unsupported.push('multiple-return-values');
+          if (!retJava && ret !== '' && !multi) unsupported.push(`unsupported-type: ${ret}`);
+          if (params === null && unsupported.length === before) {
+            unsupported.push(`func-signature: ${trimmed.slice(0, 50)}`);
+          }
+          flagLine(raw);
+          continue;
+        }
+        const paramNames = params.map((p) => p.split(' ')[1]);
+        out.push(`${INDENT}static ${retJava} ${fm[1]}(${params.join(', ')}) {`);
+        fnTypes.set(fm[1], retJava);
+        for (let i = 0; i < params.length; i++) {
+          varTypes.set(paramNames[i], params[i].split(' ')[0]);
+        }
+        stack.push({ kind: 'fn', depth, params: paramNames, savedVars: new Map(varTypes) });
+        depth += 1;
+        converted.push('func');
+        continue;
+      }
+
+      const tm = trimmed.match(/^type\s+([A-Za-z_]\w*)\s+(struct|interface)\s*\{$/);
+      if (tm) {
+        unsupported.push(tm[2]);
+        flagLine(raw);
+        continue;
+      }
+      if (/^type\s/.test(trimmed)) {
+        unsupported.push(`type-declaration: ${trimmed.slice(0, 50)}`);
+        flagLine(raw);
+        continue;
+      }
+
+      // Top-level var/const -> static fields
+      const vm = trimmed.match(/^(var|const)\s+(.+)$/);
+      if (vm) {
+        const before = unsupported.length;
+        const decl = convertDecl(vm[2], vm[1] === 'const');
+        if (decl === null || unsupported.length > before || leak(decl) !== null) {
+          flagLine(raw);
+          continue;
+        }
+        out.push(`${INDENT}static ${decl}`);
+        converted.push('static-field');
+        continue;
+      }
+
+      unsupported.push(`top-level: ${trimmed.slice(0, 50)}`);
+      flagLine(raw);
+      continue;
+    }
+
+    // ------------------------------------------------------------------
+    // Statements inside a function
+    // ------------------------------------------------------------------
+
+    if (/^defer\b/.test(trimmed)) {
+      unsupported.push('defer');
+      flagLine(raw);
+      continue;
+    }
+    if (/^go\s+\S/.test(trimmed)) {
+      unsupported.push('goroutine');
+      flagLine(raw);
+      continue;
+    }
+    if (/\bmake\(/.test(trimmed)) {
+      unsupported.push('make');
+      flagLine(raw);
+      continue;
+    }
+    if (/\bappend\(/.test(trimmed)) {
+      unsupported.push('append');
+      flagLine(raw);
+      continue;
+    }
+    if (trimmed.includes('<-') || /\bchan\b/.test(trimmed)) {
+      unsupported.push('channel');
+      flagLine(raw);
+      continue;
+    }
+
+    // x, y := f() -> multiple return values
+    if (/^[A-Za-z_]\w*\s*,/.test(trimmed) && trimmed.includes(':=')) {
+      unsupported.push('multiple-return-values');
+      flagLine(raw);
+      continue;
+    }
+
+    // x := expr (short declaration)
+    const sd = trimmed.match(/^[A-Za-z_]\w*\s*:=\s(.+)$/);
+    if (sd) {
+      const before = unsupported.length;
+      const decl = convertDecl(trimmed, false);
+      if (decl === null || unsupported.length > before || leak(decl) !== null) {
+        if (decl !== null) unsupported.push(`declaration: ${trimmed.slice(0, 50)}`);
+        flagLine(raw);
+        continue;
+      }
+      out.push(`${pad}${decl}`);
+      continue;
+    }
+
+    // var x T = e / var x T / const x = e (local)
+    const lm = trimmed.match(/^(var|const)\s+(.+)$/);
+    if (lm) {
+      const before = unsupported.length;
+      const decl = convertDecl(lm[2], lm[1] === 'const');
+      if (decl === null || unsupported.length > before || leak(decl) !== null) {
+        if (decl !== null) unsupported.push(`declaration: ${trimmed.slice(0, 50)}`);
+        flagLine(raw);
+        continue;
+      }
+      out.push(`${pad}${decl}`);
+      continue;
+    }
+
+    // if / else if / else
+    const ifM = trimmed.match(/^if\s+(.+?)\s*\{$/);
+    if (ifM) {
+      if (ifM[1].includes(':=')) {
+        unsupported.push('if-init-statement');
+        flagLine(raw);
+        continue;
+      }
+      const before = unsupported.length;
+      const cond = mapGoExpr(ifM[1], ctx);
+      if (emitChecked(`${pad}if (${cond}) {`, raw, before, 'if-condition')) {
+        depth += 1;
+        converted.push('if');
+      }
+      continue;
+    }
+    const elifM = trimmed.match(/^\}\s*else\s+if\s+(.+?)\s*\{$/);
+    if (elifM) {
+      if (elifM[1].includes(':=')) {
+        unsupported.push('if-init-statement');
+        flagLine(raw);
+        continue;
+      }
+      const before = unsupported.length;
+      const cond = mapGoExpr(elifM[1], ctx);
+      if (emitChecked(`${pad}} else if (${cond}) {`, raw, before, 'else-if-condition')) {
+        converted.push('else-if');
+      }
+      continue;
+    }
+    if (/^\}\s*else\s*\{$/.test(trimmed)) {
+      out.push(`${pad}} else {`);
+      converted.push('else');
+      continue;
+    }
+
+    // for
+    const forM = trimmed.match(/^for\s+(.*?)\s*\{$/);
+    if (forM) {
+      const head = forM[1];
+      const range2 = head.match(/^([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*:=\s*range\s+(.+)$/);
+      const range1 = head.match(/^([A-Za-z_]\w*)\s*:=\s*range\s+(.+)$/);
+
+      if (range2) {
+        const idx = range2[1];
+        const val = range2[2];
+        const before = unsupported.length;
+        const coll = mapGoExpr(range2[3], ctx);
+        const collType = varTypes.get(coll);
+        if (unsupported.length > before || !collType || !collType.endsWith('[]')) {
+          unsupported.push(`range-target: ${range2[3].trim().slice(0, 50)}`);
+          flagLine(raw);
+          continue;
+        }
+        const elem = collType.slice(0, -2);
+        if (idx === '_') {
+          varTypes.set(val, elem);
+          out.push(`${pad}for (${elem} ${val} : ${coll}) {`);
+          converted.push('for-range');
+        } else {
+          varTypes.set(idx, 'int');
+          varTypes.set(val, elem);
+          out.push(`${pad}for (int ${idx} = 0; ${idx} < ${coll}.length; ${idx}++) {`);
+          out.push(`${pad}${INDENT}${elem} ${val} = ${coll}[${idx}];`);
+          converted.push('for-range-indexed');
+        }
+        depth += 1;
+        continue;
+      }
+
+      if (range1) {
+        const idx = range1[1];
+        const before = unsupported.length;
+        const coll = mapGoExpr(range1[2], ctx);
+        const collType = varTypes.get(coll);
+        const intBound =
+          collType === 'int' || collType === 'long'
+            ? collType
+            : collType === undefined
+              ? inferGoType(coll, ctx)
+              : null;
+        if (unsupported.length > before || (collType !== undefined && !collType.endsWith('[]') && intBound === null)) {
+          unsupported.push(`range-target: ${range1[2].trim().slice(0, 50)}`);
+          flagLine(raw);
+          continue;
+        }
+        if (intBound === 'int' || intBound === 'long') {
+          // Go 1.22 range over an int
+          varTypes.set(idx, intBound);
+          out.push(`${pad}for (${intBound} ${idx} = 0; ${idx} < ${coll}; ${idx}++) {`);
+          converted.push('for-range-int');
+        } else {
+          // single variable over a slice/array: the variable is the index
+          varTypes.set(idx, 'int');
+          out.push(`${pad}for (int ${idx} = 0; ${idx} < ${coll}.length; ${idx}++) {`);
+          converted.push('for-range-index');
+        }
+        depth += 1;
+        continue;
+      }
+
+      if (head.includes(';')) {
+        // c-style: for i := 0; i < n; i++
+        const parts = splitTopLevel(head, ';');
+        const im = parts.length === 3 ? parts[0].match(/^([A-Za-z_]\w*)\s*:=\s*(.+)$/) : null;
+        if (im) {
+          const type = inferGoType(im[2], ctx) ?? 'int';
+          varTypes.set(im[1], type);
+          const before = unsupported.length;
+          const cond = mapGoExpr(parts[1], ctx);
+          const post = mapGoExpr(parts[2], ctx);
+          if (
+            emitChecked(
+              `${pad}for (${type} ${im[1]} = ${im[2]}; ${cond}; ${post}) {`,
+              raw,
+              before,
+              'for-header'
+            )
+          ) {
+            depth += 1;
+            converted.push('for-c-style');
+          }
+          continue;
+        }
+        unsupported.push(`for-header: ${head.slice(0, 50)}`);
+        flagLine(raw);
+        continue;
+      }
+
+      if (head === '') {
+        out.push(`${pad}while (true) {`);
+        depth += 1;
+        converted.push('for-infinite');
+        continue;
+      }
+
+      // for cond { -> while (cond) {
+      const before = unsupported.length;
+      const cond = mapGoExpr(head, ctx);
+      if (emitChecked(`${pad}while (${cond}) {`, raw, before, 'for-condition')) {
+        depth += 1;
+        converted.push('for-cond');
+      }
+      continue;
+    }
+
+    // fmt.Println(...) -> System.out.println with space-joined args
+    const pm = trimmed.match(/^fmt\.Println\((.*)\)$/);
+    if (pm) {
+      const inner = pm[1].trim();
+      const before = unsupported.length;
+      const args = inner === '' ? [] : splitTopLevel(inner, ',').map((a) => mapGoExpr(a, ctx));
+      for (const a of args) {
+        // printing an array diverges (Go "[1 2 3]" vs Java "[I@..."); flag it
+        if (varTypes.get(a)?.endsWith('[]')) unsupported.push(`println-array: ${a}`);
+      }
+      // Go prints runes as their numeric code; Java would print the character
+      const printed = args.map((a) => {
+        if (varTypes.get(a) === 'char') return `(int) ${a}`;
+        if (/^'(?:\\.|[^\\'])'$/.test(a)) return `(int) ${a}`;
+        return a;
+      });
+      const line = `${pad}System.out.println(${printed.join(' + " " + ')});`;
+      if (emitChecked(line, raw, before, 'println-arguments')) {
+        converted.push('println');
+      }
+      continue;
+    }
+    if (/^fmt\./.test(trimmed)) {
+      unsupported.push(`fmt-call: ${trimmed.slice(0, 50)}`);
+      flagLine(raw);
+      continue;
+    }
+
+    // return / break / continue
+    if (trimmed === 'return') {
+      out.push(`${pad}return;`);
+      converted.push('return');
+      continue;
+    }
+    const rm = trimmed.match(/^return\s+(.+)$/);
+    if (rm) {
+      const before = unsupported.length;
+      const mapped = mapGoExpr(rm[1], ctx);
+      if (emitChecked(`${pad}return ${mapped};`, raw, before, 'return-expression')) {
+        converted.push('return');
+      }
+      continue;
+    }
+    if (trimmed === 'break' || trimmed === 'continue') {
+      out.push(`${pad}${trimmed};`);
+      converted.push('break-continue');
+      continue;
+    }
+
+    // i++ / i--
+    const incm = trimmed.match(/^([A-Za-z_]\w*)\s*(\+\+|--)$/);
+    if (incm) {
+      out.push(`${pad}${incm[1]}${incm[2]};`);
+      converted.push('increment');
+      continue;
+    }
+
+    // assignments (plain and compound); "_" is Go's blank identifier and
+    // is not a valid Java variable
+    const am = trimmed.match(/^([A-Za-z_]\w*(?:\[[^\]\[]*\])?)\s*(\+=|-=|\*=|\/=|%=|&=|\|=|=)\s*(.+)$/);
+    if (am) {
+      if (am[1] === '_') {
+        unsupported.push('blank-identifier');
+        flagLine(raw);
+        continue;
+      }
+      const before = unsupported.length;
+      const mapped = mapGoExpr(am[3], ctx);
+      if (emitChecked(`${pad}${am[1]} ${am[2]} ${mapped};`, raw, before, 'assignment')) {
+        converted.push('assignment');
+      }
+      continue;
+    }
+
+    // bare expression statements (calls, etc.)
+    const before = unsupported.length;
+    const mapped = mapGoExpr(trimmed.replace(/;$/, ''), ctx);
+    if (emitChecked(`${pad}${mapped};`, raw, before, 'statement')) {
+      converted.push('expression-statement');
+    }
+    continue;
+  }
+
+  // Leak scan: any Go-ism that survived conversion is reported, never
+  // silently emitted as if it were valid Java.
+  for (const emitted of out) {
+    const t = emitted.trim();
+    if (!t || t.startsWith('//')) continue;
+    const m = stripStringsForScan(emitted).match(GO_JAVA_LEAK);
+    if (m) {
+      unsupported.push(`unconverted go syntax "${m[0]}" in: ${t.slice(0, 60)}`);
+    }
+  }
+
+  return {
+    code: ['public class Main {', ...out, '}'].join('\n'),
     converted: Array.from(new Set(converted)),
     unsupported: Array.from(new Set(unsupported)),
   };

@@ -1,0 +1,95 @@
+# CI for the universal-transpiler test suite.
+#
+# This file is executed only by GitHub Actions on GitHub-hosted runners
+# (ubuntu-latest). It cannot be run locally; local validation of this file was
+# limited to parsing it as YAML (see repo notes). What runs where:
+#   - YAML syntax: validated locally at author time with python3 -c "import yaml...".
+#   - Actions/setup-* steps: GitHub-hosted runner only.
+#   - npm ci / tsc --noEmit / jest: run inside the runner workspace at
+#     universal-transpiler/, same commands that pass locally.
+#
+# Toolchain on ubuntu-latest:
+#   node 20 + npm (setup-node, with npm cache from the project lockfile),
+#   go (setup-go, stable), java 21 temurin (setup-java), python 3.x
+#   (setup-python). gcc/g++ and docker are preinstalled on the runner image
+#   and need no setup step.
+#
+# Tests that require a toolchain missing from the runner skip cleanly (they
+# probe availability first), and the rust/haskell suites fall back to docker
+# images, which are pulled on first use -- hence the generous timeouts below.
+#
+# No MISTRAL_API_KEY secret is passed: live-LLM tests skip themselves without
+# it, which is the intended CI behavior.
+
+name: universal-transpiler CI
+
+on:
+  push:
+    paths:
+      - 'universal-transpiler/**'
+  pull_request:
+    paths:
+      - 'universal-transpiler/**'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (node 20, ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: universal-transpiler
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20 (npm cache from project lockfile)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'universal-transpiler/package-lock.json'
+
+      - name: Set up Go (stable)
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Set up Java 21 (temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Python 3.x
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # gcc/g++ ship with the ubuntu-latest runner image; no setup step needed.
+      # docker is also preinstalled for the rust/haskell fallback suites.
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      - name: Typecheck (tsc --noEmit, must exit 0)
+        run: npx tsc --noEmit
+
+      # Jest per-test timeout is 120s (jest.config.js). Docker image pulls for
+      # the rust/haskell fallback suites happen on first use inside these
+      # tests, so this step gets a generous timeout of its own.
+      - name: Run test suite (npx jest, all suites must pass)
+        run: npx jest
+        timeout-minutes: 20
+
+  # NOTE on the omitted lint job:
+  # The package.json "lint" script ("eslint src --ext .ts") does not run
+  # out of the box: the project has ESLint v9 installed, which requires a
+  # flat config (eslint.config.js) and no longer supports the --ext flag,
+  # and no .eslintrc.* or eslint.config.* file exists in the project. Adding
+  # a lint job now would only fail CI, so it is intentionally skipped instead
+  # of adding config that was not asked for. Type safety is still enforced by
+  # the `npx tsc --noEmit` step above.
