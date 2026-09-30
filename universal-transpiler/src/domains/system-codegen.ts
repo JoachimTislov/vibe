@@ -231,7 +231,7 @@ function webBackendCode(spec: SystemSpec, target: SystemTarget): string | undefi
           `}`,
           ``,
         ]),
-        `func json(w http.ResponseWriter, body interface{}) {`,
+        `func writeJSON(w http.ResponseWriter, body interface{}) {`,
         `	w.Header().Set("Content-Type", "application/json")`,
         `	json.NewEncoder(w).Encode(body)`,
         `}`,
@@ -253,12 +253,12 @@ function webBackendCode(spec: SystemSpec, target: SystemTarget): string | undefi
       for (const r of routes) {
         const record = recordForPath(spec, r.path);
         const handler = r.path === '/health'
-          ? `json(w, map[string]bool{"ok": true})`
+          ? `writeJSON(w, map[string]bool{"ok": true})`
           : record
-            ? `json(w, ${upperCamel(record.name)}{${record.fields
+            ? `writeJSON(w, ${upperCamel(record.name)}{${record.fields
                 .map((f) => `${upperCamel(f)}: ${JSON.stringify(sampleValue(f))}`)
                 .join(', ')}})`
-            : `json(w, map[string]bool{"ok": true})`;
+            : `writeJSON(w, map[string]bool{"ok": true})`;
         out.push(
           `\thttp.HandleFunc("${r.path}", func(w http.ResponseWriter, req *http.Request) {`,
           `\t\tif req.Method != "${r.method}" {`,
@@ -284,7 +284,7 @@ function webBackendCode(spec: SystemSpec, target: SystemTarget): string | undefi
           `\t\t\tfor _, v := range ${store} {`,
           `\t\t\t\tlist = append(list, v)`,
           `\t\t\t}`,
-          `\t\t\tjson(w, list)`,
+          `\t\t\twriteJSON(w, list)`,
           `\t\tcase "POST":`,
           `\t\t\tvar item ${type}`,
           `\t\t\tbody, _ := io.ReadAll(req.Body)`,
@@ -292,7 +292,7 @@ function webBackendCode(spec: SystemSpec, target: SystemTarget): string | undefi
           `\t\t\titem.${idField} = ${next}`,
           `\t\t\t${next}++`,
           `\t\t\t${store}[item.${idField}] = item`,
-          `\t\t\tjson(w, item)`,
+          `\t\t\twriteJSON(w, item)`,
           `\t\tdefault:`,
           `\t\t\tw.WriteHeader(http.StatusMethodNotAllowed)`,
           `\t\t}`,
@@ -310,17 +310,17 @@ function webBackendCode(spec: SystemSpec, target: SystemTarget): string | undefi
           `\t\t\t\tw.WriteHeader(http.StatusNotFound)`,
           `\t\t\t\treturn`,
           `\t\t\t}`,
-          `\t\t\tjson(w, item)`,
+          `\t\t\twriteJSON(w, item)`,
           `\t\tcase "PUT":`,
           `\t\t\tvar item ${type}`,
           `\t\t\tbody, _ := io.ReadAll(req.Body)`,
           `\t\t\tjson.Unmarshal(body, &item)`,
           `\t\t\titem.${idField} = id`,
           `\t\t\t${store}[id] = item`,
-          `\t\t\tjson(w, item)`,
+          `\t\t\twriteJSON(w, item)`,
           `\t\tcase "DELETE":`,
           `\t\t\tdelete(${store}, id)`,
-          `\t\t\tjson(w, map[string]bool{"deleted": true})`,
+          `\t\t\twriteJSON(w, map[string]bool{"deleted": true})`,
           `\t\tdefault:`,
           `\t\t\tw.WriteHeader(http.StatusMethodNotAllowed)`,
           `\t\t}`,

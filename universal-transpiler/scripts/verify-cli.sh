@@ -357,6 +357,20 @@ echo "ok - the web-backend agent produced a gofmt-standard net/http scaffold"
 sed 's/^/    /' "$TMP/scaffold.err" | head -6
 pass=$((pass + 1))
 
+banner "dispatch --output writes a runnable artifact to disk"
+cat > "$TMP/tool.js" <<'JS'
+const argv = require('process').argv;
+console.log('cli: args', argv.slice(2).join(','));
+JS
+node "$CLI" dispatch "$TMP/tool.js" --produce scaffold --code-target go --output "$TMP/scaffold-artifact.go" --state "$STATE" > /dev/null 2> "$TMP/out.err"
+grep -q "artifact written to" "$TMP/out.err" || fail "dispatch output: artifact note missing"
+grep -q 'package main' "$TMP/scaffold-artifact.go" || fail "dispatch output: artifact content wrong"
+# The written artifact is a real program: run it through the engine
+node "$CLI" run "$TMP/scaffold-artifact.go" --state "$STATE" -- --name=written-by-cli > "$TMP/out-run.out" 2> "$TMP/out-run.err"
+grep -q 'hello written-by-cli' "$TMP/out-run.out" || fail "dispatch output: written artifact did not run"
+echo "ok - artifact written via --output and re-executed through the engine"
+pass=$((pass + 1))
+
 banner "dispatch orders.system (the generalized 5GL system declaration)"
 cat > "$TMP/orders.system" <<'SYS'
 # The orders service, declared

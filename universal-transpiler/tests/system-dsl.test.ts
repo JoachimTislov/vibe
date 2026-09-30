@@ -343,6 +343,29 @@ describe('dispatch: a system document flows through its designated agent', () =>
     expect(result.produced.text).toContain('job totals over Sale');
   });
 
+  it('go resource codegen compiles (native artifact, no run)', async () => {
+    const go = engine.toolchains.forLanguage('go');
+    await go?.probe();
+    if (!go?.info.available) return console.warn('skipping: go unavailable');
+
+    const doc = `system web-backend "Store service" {
+    record Item {
+        id
+        label
+        total
+    }
+    module api {
+        endpoint GET /health
+        resource Item
+    }
+}
+`;
+    const code = generateSystemCode(parseSystemDsl(doc).spec, 'go')!;
+    const report = await engine.compile(code, { language: 'go', platform: 'native' });
+    expect(report.result.ok).toBe(true);
+    expect(report.route).toBe('native-compile');
+  }, 120_000);
+
   it('the generated CRUD server serves the declared resource over live HTTP', async () => {
     const doc = `system web-backend "Store service" {
     record Item {
