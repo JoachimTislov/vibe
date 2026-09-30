@@ -40,7 +40,23 @@ import {
   type ScopeSetup,
   type ScopeSetupInput,
 } from './user-contract';
+import {
+  JudgmentModelRegistry,
+  type Judgment,
+  type JudgmentModel,
+  type JudgmentOption,
+  type JudgmentQuestion,
+} from './judgment';
+import {
+  DomainAgentRegistry,
+  GenericDomainAgent,
+  type DomainAgentFlowRequest,
+  type DomainAgentFlowResult,
+} from '../agents/domain-agent';
+import { FoodTrackingAgent } from '../agents/foodsavr-agent';
+import { RecipesAgent } from '../agents/recipes-agent';
 import { parseWorkflowDsl } from '../domains/workflow-dsl';
+import type { FoodWorkflowSpec } from '../domains/foodsavr';
 import type { FeedbackRecord, Goal } from './persistent-state';
 import type { LLMClient } from '../core/universal-transpiler';
 
@@ -65,6 +81,13 @@ export interface EngineOptions {
    * DEFAULT_DECISION_POLICY; see GOVERNANCE.md for the full contract.
    */
   decisionPolicy?: Partial<DecisionPolicy>;
+  /**
+   * A judgment-model provider to register under its own name (e.g. a
+   * Jev-style decision model). Selected per request through
+   * DecisionPolicy.judgmentModel; the built-in 'heuristic' model is
+   * always available as the default.
+   */
+  judgmentModel?: JudgmentModel;
 }
 
 export interface EngineRunRequest extends RunOptions {
@@ -137,11 +160,27 @@ export class UniversalEngine {
   readonly vault: DefinitionVault;
   /** The active decision policy (data, not hardcoded behavior) */
   readonly policy: DecisionPolicy;
-  private options: Required<Omit<EngineOptions, 'llm' | 'statePath' | 'learn' | 'decisionPolicy'>> & {
+  /**
+   * The judgment-model registry: the open decision layer. Typed
+   * decisions (agent routing, platform selection, promotion,
+   * retry/escalate) consult the provider named by the effective policy's
+   * judgmentModel field. The built-in 'heuristic' provider is always
+   * registered; a Jev-style judgment model registers here.
+   */
+  readonly judgment: JudgmentModelRegistry;
+  /**
+   * Domain agents: a designated agent per domain within the universal
+   * interpreter, each owning the full interpret -> organize -> define ->
+   * create -> produce flow for its domain. The generic agent is the
+   * always-accepting fallback.
+   */
+  readonly agents: DomainAgentRegistry;
+  private options: Required<Omit<EngineOptions, 'llm' | 'statePath' | 'learn' | 'decisionPolicy' | 'judgmentModel'>> & {
     llm?: LLMClient;
     statePath?: string;
     learn?: EngineOptions['learn'];
     decisionPolicy?: Partial<DecisionPolicy>;
+    judgmentModel?: JudgmentModel;
   };
 
   constructor(options: EngineOptions = {}) {
@@ -162,6 +201,20 @@ export class UniversalEngine {
         ? this.policy.promotionThreshold
         : Number.POSITIVE_INFINITY; // 'agent-decides': only the sweep promotes
     this.state.observeOnly = this.policy.learningMode === 'observe-only';
+
+    // Judgment models: the open decision layer. The deterministic
+    // heuristic model is the default; additional providers (e.g. a
+    // Jev-style judgment model) register here and are selected by name
+    // through DecisionPolicy.judgmentModel — policy data, not code.
+    this.judgment = new JudgmentModelRegistry();
+    if (options.judgmentModel) this.judgment.register(options.judgmentModel);
+
+    // Domain agents: one designated agent per registered domain, generic
+    // fallback last so specialists always win when they can handle input
+    this.agents = new DomainAgentRegistry()
+      .register(new FoodTrackingAgent(this))
+      .register(new RecipesAgent(this))
+      .register(new GenericDomainAgent(this));
 
     this.options = {
       defaultPlatform: 'auto',
@@ -653,6 +706,111 @@ export class UniversalEngine {
   }
 
   // ==========================================================================
+  // Dispatch: interpretation -> judgment -> the designated domain agent
+  // ==========================================================================
+
+  /**
+   * The full flow through the universal interpreter:
+   *
+   *   1. interpret — every token compared against vault history first
+   *   2. judge — a typed 'select-domain-agent' decision, made by the
+   *      judgment-model provider the effective policy names (heuristic
+   *      by default; a Jev-style model when registered and selected)
+   *   3. flow — the designated agent runs interpret -> organize ->
+   *      define -> create -> produce for its domain
+   *
+   * The interpretation report inside the agent's flow result reuses this
+   * dispatch's interpretation (history is compared exactly once).
+   */
+  async dispatch(
+    source: string,
+    request: EngineRunRequest & Pick<DomainAgentFlowRequest, 'produce' | 'codeTarget'> = {}
+  ): Promise<DomainAgentFlowResult> {
+    // 1. Interpretation: history comparison before anything else
+    const interpretation = await this.interpret(source, request);
+    const domainId = interpretation.analysis.domain.id;
+
+    // 2. The typed agent-routing decision
+    const maxScore = Math.max(1, ...interpretation.analysis.scores.map((s) => s.score));
+    const scoreOf = (d: string) =>
+      (interpretation.analysis.scores.find((s) => s.domainId === d)?.score ?? 0) / maxScore;
+
+    const candidates = this.agents.candidates({ source, domain: domainId, interpretation });
+    const options: JudgmentOption<string>[] = candidates.map((agent) => ({
+      value: agent.id,
+      label: `${agent.id} (${agent.domain})`,
+      score:
+        Math.max(scoreOf(agent.domain), ...(agent.alsoHandles ?? []).map(scoreOf)) +
+        (agent.domain === domainId ? 0.25 : 0) +
+        (agent.inputAffinity?.(source) ?? 0),
+      metadata: { primaryDomain: agent.domain, alsoHandles: agent.alsoHandles ?? [] },
+    }));
+    if (options.length === 0) {
+      throw new Error(`no domain agent can handle domain "${domainId}"`);
+    }
+
+    const judgment = await this.judge(
+      {
+        kind: 'select-domain-agent',
+        context: `route input to the designated domain agent (winning domain: ${domainId})`,
+        state: {
+          domain: domainId,
+          domainScores: interpretation.analysis.scores,
+          matchedKeywords: interpretation.analysis.matchedKeywords,
+          platform: interpretation.analysis.platform,
+          scope: request.scope ?? null,
+          tokenCount: interpretation.tokenCount,
+          matchedHistory: interpretation.matched.length,
+        },
+        options,
+      },
+      request.scope
+    );
+
+    // 3. The chosen agent executes the flow
+    const agent =
+      candidates.find((a) => a.id === judgment.choice) ??
+      this.agents.forDomain(domainId) ??
+      candidates[0];
+    this.state.logProgress(
+      'agent-dispatch',
+      `domain "${domainId}" -> agent ${agent.id} (judgment model: ${judgment.model}, confidence ${judgment.confidence})`
+    );
+    this.state.save();
+
+    return agent.flow({
+      source,
+      scope: request.scope,
+      clientId: request.clientId,
+      platform: request.platform,
+      produce: request.produce,
+      codeTarget: request.codeTarget,
+      judgment,
+    });
+  }
+
+  /**
+   * Consult the judgment model the effective policy selects. Open point:
+   * the provider is data (DecisionPolicy.judgmentModel); the
+   * implementations live in the registry (engine.judgment).
+   */
+  judge<T extends string>(
+    question: JudgmentQuestion<T>,
+    scopeId?: string
+  ): Promise<Judgment<T>> {
+    const model = this.judgment.get(this.effectivePolicy(scopeId).judgmentModel);
+    return model.decide(question);
+  }
+
+  /** Engine policy merged with the scope's policy overrides, when set. */
+  private effectivePolicy(scopeId?: string): DecisionPolicy {
+    const scope = scopeId ? this.getScope(scopeId) : undefined;
+    return scope?.decisionPolicy
+      ? mergePolicy({ ...this.policy, ...scope.decisionPolicy })
+      : this.policy;
+  }
+
+  // ==========================================================================
   // Vocabulary ingestion: documents enrich the vault
   // ==========================================================================
 
@@ -670,54 +828,70 @@ export class UniversalEngine {
     options: { clientId?: string } = {}
   ): { domain: string; keyword: string; kind: string }[] {
     const doc = parseWorkflowDsl(dslSource);
+    return this.ingestSpecVocabulary(doc.spec, doc.domain, {
+      ...options,
+      title: doc.title,
+    });
+  }
+
+  /**
+   * Ingest a composed workflow spec's vocabulary directly (no DSL
+   * round-trip) — used by domain agents that compose specs in memory
+   * (e.g. the recipes agent) and by any client holding a spec.
+   */
+  ingestSpecVocabulary(
+    spec: FoodWorkflowSpec,
+    domain: string,
+    options: { clientId?: string; title?: string } = {}
+  ): { domain: string; keyword: string; kind: string }[] {
     const created: { domain: string; keyword: string; kind: string }[] = [];
 
-    for (const collection of doc.spec.collections) {
+    for (const collection of spec.collections) {
       for (const product of collection.products) {
-        const existing = this.vault.lookupInDomain(product.name, doc.domain);
+        const existing = this.vault.lookupInDomain(product.name, domain);
         if (existing) {
-          this.vault.recordEncounter(product.name, doc.domain);
+          this.vault.recordEncounter(product.name, domain);
         } else {
-          this.vault.define(product.name, doc.domain, {
+          this.vault.define(product.name, domain, {
             kind: 'entity',
             semantics: `food product tracked in collection "${collection.name}"`,
             confidence: 0.75,
             taughtBy: options.clientId,
           });
         }
-        created.push({ domain: doc.domain, keyword: product.name, kind: 'entity' });
+        created.push({ domain: domain, keyword: product.name, kind: 'entity' });
 
         if (product.category) {
-          const catExisting = this.vault.lookupInDomain(product.category, doc.domain);
+          const catExisting = this.vault.lookupInDomain(product.category, domain);
           if (!catExisting) {
-            this.vault.define(product.category, doc.domain, {
+            this.vault.define(product.category, domain, {
               kind: 'entity',
               semantics: `product category (seen on ${product.name})`,
               confidence: 0.7,
               taughtBy: options.clientId,
             });
-            created.push({ domain: doc.domain, keyword: product.category, kind: 'entity' });
+            created.push({ domain: domain, keyword: product.category, kind: 'entity' });
           }
         }
       }
     }
 
-    for (const meal of doc.spec.mealPlan ?? []) {
+    for (const meal of spec.mealPlan ?? []) {
       if (!meal.name) continue;
-      if (!this.vault.lookupInDomain(meal.name, doc.domain)) {
-        this.vault.define(meal.name, doc.domain, {
+      if (!this.vault.lookupInDomain(meal.name, domain)) {
+        this.vault.define(meal.name, domain, {
           kind: 'entity',
           semantics: 'planned meal',
           confidence: 0.7,
           taughtBy: options.clientId,
         });
-        created.push({ domain: doc.domain, keyword: meal.name, kind: 'entity' });
+        created.push({ domain: domain, keyword: meal.name, kind: 'entity' });
       }
     }
 
     this.state.logProgress(
       'keyword-learned',
-      `ingested ${created.length} vocabulary entries from workflow document "${doc.title}"`
+      `ingested ${created.length} vocabulary entries from workflow \"${options.title ?? domain}\"`
     );
     this.state.save();
     return created;

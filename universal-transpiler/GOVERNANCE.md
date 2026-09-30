@@ -41,6 +41,7 @@ the state they set up.
 | Target platform | declared > client feedback > framework > domain default | `DecisionPolicy.platformResolution`, or declaring a platform |
 | When client feedback becomes global | 2 distinct clients corroborate | `DecisionPolicy.promotionThreshold` (any number, or `'agent-decides'`) |
 | Whether unknown keywords are learned | on (candidates after corroboration) | `DecisionPolicy.learningMode: 'on' \| 'observe-only' \| 'off'` |
+| Which judgment model makes typed decisions | `'heuristic'` (built-in, deterministic) | `DecisionPolicy.judgmentModel` — any registered provider's name |
 | Code style of produced code | the target language's ecosystem standard | `CodeStandards.style` |
 | Scope of teaching | user's declared scope domains | `ScopeSetup.domains` |
 
@@ -83,3 +84,73 @@ were new (now candidates), what was learned during this interpretation,
 and the resulting domain/platform/route decision. Interpretation is how
 the system iterates: yesterday's learned definitions change today's
 interpretation of the same words.
+
+## The judgment layer (open for Jev-style decision models)
+
+Every "which/whether" decision inside the system is a typed question
+consulted through a **judgment model**: machine-consumable state in, typed
+choice out — scores, probabilities, confidence. No prose, no prompts:
+the LLM tier stays reserved for tasks that need language, while routing,
+ranking, promotion and escalation go through this silent decision layer.
+
+The interface (`src/engine/judgment.ts`):
+
+```ts
+interface JudgmentModel {
+  readonly name: string;
+  decide<T extends string>(q: JudgmentQuestion<T>): Promise<Judgment<T>>;
+}
+// Question: { kind, state: structured state, options: [{value, score, ...}] }
+// Answer:   { choice, scores?, probabilities?, confidence, model }
+```
+
+The provider is **selected by name in policy data**
+(`DecisionPolicy.judgmentModel`, default `'heuristic'`); implementations
+are registered on `engine.judgment`. Registering a Jev-style judgment
+model and selecting it per scope is the entire integration:
+
+```ts
+engine.judgment.register(jevAdapter);          // once, in code
+engine.setupScope({
+  scopeId: 'my-scope',
+  decisionPolicy: { judgmentModel: 'jev' },     // data, swappable anytime
+});
+```
+
+Unknown names fall back to the default provider — a policy typo can never
+deadlock the system. Decision sites today: `'select-domain-agent'`
+(agent routing in `engine.dispatch`); the kinds `'select-platform'`,
+`'promote-feedback'`, `'promote-candidate'` and `'retry-or-escalate'` are
+reserved for the same pattern.
+
+## The dispatch flow: a designated agent per domain
+
+`engine.dispatch(source, request)` is the full flow through the universal
+interpreter:
+
+```
+input (any syntax)
+  -> interpret      every token vs vault history (InterpretationReport)
+  -> judge          typed 'select-domain-agent' decision (policy-selected model)
+  -> agent flow     the designated DomainAgent for the winning domain:
+        interpret -> organize -> define -> create -> produce
+```
+
+Registered agents (`src/agents/`):
+
+| Agent | Domain | Produces |
+|---|---|---|
+| `agent:food-tracking` | food-tracking | workflow result, shopping.v1 payloads, standalone code (js/ts/go/rust), DSL |
+| `agent:recipes` | recipes (also food-tracking) | composed spec from recipes + schedule + inventory, then the full food-tracking output |
+| `generic:generic` | every other domain | executes the source through the engine's routing |
+
+Agent routing is not hardcoded: the dispatch site builds a typed question
+(domain scores, matched keywords, input affinity) and the judgment model
+decides. An agent that can structurally parse the input (DSL document,
+recipes document) outranks one that merely shares vocabulary. The routing
+decision is traced in the persistent progress log (`agent-dispatch`).
+
+The agents honor the contract above end to end: they run under the
+request's scope, produce under the resolved standards, ingest vocabulary
+through the system's corroboration rules (persist-on-encounter), and never
+expose a user write path into internal history.

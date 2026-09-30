@@ -115,12 +115,22 @@ export interface DecisionPolicy {
    * - 'off': no learning; interpretation uses existing history only
    */
   learningMode: 'on' | 'observe-only' | 'off';
+  /**
+   * The judgment-model provider NAME (see engine/judgment.ts): which
+   * registered decision model the system consults for typed decisions
+   * (agent routing, platform selection, promotion, retry/escalate).
+   * 'heuristic' (default) is the built-in deterministic model. Any
+   * registered provider — a Jev-style judgment model included — is
+   * selectable here, in policy data, with no code change.
+   */
+  judgmentModel: string;
 }
 
 export const DEFAULT_DECISION_POLICY: DecisionPolicy = {
   platformResolution: 'user-then-system',
   promotionThreshold: 2,
   learningMode: 'on',
+  judgmentModel: 'heuristic',
 };
 
 export function mergePolicy(overrides?: Partial<DecisionPolicy>): DecisionPolicy {

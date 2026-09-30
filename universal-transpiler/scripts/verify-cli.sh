@@ -327,6 +327,27 @@ grep -q 'route: native-run' "$TMP/workflow-js.err" || fail "workflow js: route n
 echo "ok - workflow document executed through the engine (js target)"
 pass=$((pass + 1))
 
+
+# ---------------------------------------------------------------------------
+# 6d. dispatch: the full flow (interpret -> judgment -> domain agent)
+# ---------------------------------------------------------------------------
+banner "dispatch weekly.dsl (judgment-routed domain agent)"
+node "$CLI" dispatch "$TMP/weekly.dsl" --state "$STATE" > "$TMP/dispatch.out" 2> "$TMP/dispatch.err"
+grep -q 'agent: agent:food-tracking (domain food-tracking)' "$TMP/dispatch.err" || fail "dispatch: wrong agent routed"
+grep -q 'judgment: model heuristic chose agent:food-tracking' "$TMP/dispatch.err" || fail "dispatch: judgment trace missing"
+grep -q '"toBuy": 5' "$TMP/dispatch.out" || fail "dispatch: workflow result missing"
+grep -q 'idempotency_key' "$TMP/dispatch.out" || fail "dispatch: shopping.v1 payloads missing"
+echo "ok - dispatch routed to the designated food-tracking agent"
+sed 's/^/    /' "$TMP/dispatch.err"
+pass=$((pass + 1))
+
+banner "dispatch weekly.dsl --produce code --code-target go"
+node "$CLI" dispatch "$TMP/weekly.dsl" --produce code --code-target go --state "$STATE" > "$TMP/dispatch-go.out" 2> "$TMP/dispatch-go.err"
+grep -q 'package main' "$TMP/dispatch-go.out" || fail "dispatch code: go program missing"
+grep -q 'generated standalone go program' "$TMP/dispatch-go.err" || fail "dispatch code: generation note missing"
+echo "ok - dispatch produced a standalone go program for the same input"
+pass=$((pass + 1))
+
 banner "workflow broken.dsl (syntax error -> file:line, exit 1)"
 set +e
 node "$CLI" workflow "$TMP/broken.dsl" > "$TMP/workflow-bad.out" 2> "$TMP/workflow-bad.err"

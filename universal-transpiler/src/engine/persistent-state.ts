@@ -83,7 +83,7 @@ export interface ProgressEntry {
   kind: 'goal-defined' | 'goal-started' | 'goal-done' | 'goal-failed' |
         'keyword-candidate' | 'keyword-learned' |
         'feedback-recorded' | 'feedback-promoted' |
-        'transpile-verified' | 'client-seen' | 'note';
+        'transpile-verified' | 'client-seen' | 'agent-dispatch' | 'note';
   detail: string;
 }
 
