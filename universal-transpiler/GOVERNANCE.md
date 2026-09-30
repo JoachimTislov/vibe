@@ -118,10 +118,18 @@ engine.setupScope({
 ```
 
 Unknown names fall back to the default provider — a policy typo can never
-deadlock the system. Decision sites today: `'select-domain-agent'`
-(agent routing in `engine.dispatch`); the kinds `'select-platform'`,
-`'promote-feedback'`, `'promote-candidate'` and `'retry-or-escalate'` are
-reserved for the same pattern.
+deadlock the system. Decision sites today:
+
+- `'select-domain-agent'` — agent routing in `engine.dispatch`
+- `'select-platform'` — platform resolution under
+  `DecisionPolicy.platformResolution: 'system'`
+- `'promote-feedback'` — the upstream promotion sweep under
+  `DecisionPolicy.promotionThreshold: 'agent-decides'` (the model weighs
+  corroboration per pending value; the heuristic default matches the
+  numeric threshold behavior)
+
+The kinds `'promote-candidate'` and `'retry-or-escalate'` are reserved
+for the same pattern.
 
 ## The dispatch flow: a designated agent per domain
 

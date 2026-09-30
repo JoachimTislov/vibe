@@ -26,6 +26,7 @@ import {
   analyzeDomain,
   canTargetPlatform,
   defaultPlatformFor,
+  PLATFORM_CAPABILITIES,
   type DomainAnalysisResult,
 } from '../domains/domain-analyzer';
 import { TranspileMatrix, type MatrixTranspileResult } from './transpile-matrix';
@@ -272,6 +273,39 @@ export class UniversalEngine {
         ...clientOverrides,
       }),
     });
+
+    // 2b. Platform resolution as a judgment decision: under
+    // 'system' policy (no user-declared platform), the judgment model
+    // the policy names picks among the language's capable platforms.
+    if (this.policy.platformResolution === 'system' && !request.platform) {
+      const capable = PLATFORM_CAPABILITIES[language.toLowerCase()] ?? [];
+      const candidates = [
+        analysis.platform,
+        ...capable.filter((p) => p !== analysis.platform),
+      ];
+      const judgment = await this.judge({
+        kind: 'select-platform',
+        context: `resolve the target platform for domain "${analysis.domain.id}" in ${language}`,
+        state: {
+          domain: analysis.domain.id,
+          language,
+          frameworks: analysis.frameworks,
+          domainDefault: analysis.platform,
+          capablePlatforms: capable,
+        },
+        options: candidates.map((p, i) => ({
+          value: p,
+          label: p,
+          score: i === 0 ? 1 : 0.3,
+        })),
+      }, request.scope);
+      if (judgment.choice !== analysis.platform) {
+        notes.push(
+          `judgment model ${judgment.model} resolved platform ${judgment.choice} (domain default was ${analysis.platform})`
+        );
+      }
+      analysis.platform = judgment.choice;
+    }
 
     // 3. Learn from this encounter per the active policy:
     //    on -> candidates become definitions on corroboration;
@@ -995,7 +1029,7 @@ export class UniversalEngine {
           await this.goalVerifyTranspilePairs();
           this.state.completeGoal(goal.id, 'all structural pairs exercised');
         } else if (goal.title === 'promote-pending-feedback') {
-          this.goalPromotePendingFeedback();
+          await this.goalPromotePendingFeedback();
           this.state.completeGoal(goal.id, 'promotion sweep complete');
         } else if (goal.title === 'run-hello-world-per-language') {
           const results = await this.goalRunHelloWorlds();
@@ -1040,8 +1074,14 @@ export class UniversalEngine {
     }
   }
 
-  private goalPromotePendingFeedback(): void {
-    // Promote every un-promoted feedback whose value is shared by >= 2 clients
+  /**
+   * The upstream promotion sweep. A numeric promotionThreshold promotes
+   * every pending feedback value corroborated by that many distinct
+   * clients. 'agent-decides' turns each value into a typed
+   * 'promote-feedback' judgment decision — the policy-named model
+   * decides case by case from the corroboration evidence.
+   */
+  private async goalPromotePendingFeedback(): Promise<void> {
     const byValue: Record<string, { subject: FeedbackRecord['subject']; value: string; clients: Set<string> }> = {};
     for (const profile of Object.values(this.state.data.clients)) {
       for (const fb of profile.feedback) {
@@ -1050,8 +1090,33 @@ export class UniversalEngine {
         (byValue[key] ||= { subject: fb.subject, value: fb.value, clients: new Set() }).clients.add(profile.id);
       }
     }
+    const threshold = this.policy.promotionThreshold;
     for (const entry of Object.values(byValue)) {
-      if (entry.clients.size >= 2) {
+      const corroboration = entry.clients.size;
+      if (typeof threshold === 'number') {
+        if (corroboration >= threshold) {
+          this.state.promoteFeedback(entry.subject, entry.value);
+        }
+        continue;
+      }
+      // 'agent-decides': a typed judgment per pending value. The heuristic
+      // default promotes at 2+ corroborating clients, matching the
+      // default threshold; other models may decide differently.
+      const judgment = await this.judge({
+        kind: 'promote-feedback',
+        context: `move ${entry.subject} feedback "${entry.value}" upstream?`,
+        state: {
+          subject: entry.subject,
+          value: entry.value,
+          clients: [...entry.clients],
+          corroboration,
+        },
+        options: [
+          { value: 'promote', label: 'move upstream (applies to every client)', score: Math.min(1, corroboration / 2) },
+          { value: 'hold', label: 'keep client-local', score: corroboration >= 2 ? 0.2 : 0.6 },
+        ],
+      });
+      if (judgment.choice === 'promote') {
         this.state.promoteFeedback(entry.subject, entry.value);
       }
     }

@@ -20,6 +20,7 @@ import {
   JudgmentModelRegistry,
   type Judgment,
   type JudgmentModel,
+  type JudgmentQuestion,
 } from '../src/engine/judgment';
 import { UniversalEngine } from '../src/engine/universal-engine';
 import { DEFAULT_DECISION_POLICY } from '../src/engine/user-contract';
@@ -106,6 +107,89 @@ describe('judgment model registry (the open adapter point)', () => {
 
   it('the policy names the provider: judgmentModel is data with a heuristic default', () => {
     expect(DEFAULT_DECISION_POLICY.judgmentModel).toBe('heuristic');
+  });
+});
+
+describe('judgment-governed decision sites', () => {
+  it("select-platform: under 'system' policy the judgment model resolves the platform", async () => {
+    // A Jev-style model that always picks wasm when it is an option
+    const wasmPreferring: JudgmentModel = {
+      name: 'wasm-first',
+      decide: (q) => {
+        const wasm = q.options.find((o) => o.value === 'wasm');
+        return Promise.resolve({
+          choice: wasm ? wasm.value : q.options[0].value,
+          confidence: 0.9,
+          model: 'wasm-first',
+        });
+      },
+    };
+    const engine = new UniversalEngine({
+      statePath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'univ-platform-')), 's.json'),
+      judgmentModel: wasmPreferring,
+      decisionPolicy: { platformResolution: 'system', judgmentModel: 'wasm-first' },
+    });
+
+    const report = await engine.analyze(
+      'package main\n\nimport "fmt"\n\nfunc main() { fmt.Println("hi") }\n',
+      { language: 'go' }
+    );
+    expect(report.analysis.platform).toBe('wasm');
+  });
+
+  it('select-platform: default policy never consults a model (declared > inference)', async () => {
+    const engine = new UniversalEngine({
+      statePath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'univ-platform-default-')), 's.json'),
+    });
+    const report = await engine.analyze(
+      'package main\n\nimport "fmt"\n\nfunc main() { fmt.Println("hi") }\n',
+      { language: 'go' }
+    );
+    expect(report.analysis.platform).toBe('native');
+  });
+
+  it("promote-feedback: 'agent-decides' holds single-client feedback and promotes corroborated feedback", async () => {
+    const engine = new UniversalEngine({
+      statePath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'univ-promote-')), 's.json'),
+      decisionPolicy: { promotionThreshold: 'agent-decides' },
+    });
+
+    engine.feedback('alice', 'platform-preference', 'web-backend=native');
+    engine.feedback('bob', 'platform-preference', 'web-backend=native');
+    engine.feedback('carol', 'platform-preference', 'web-backend=docker');
+
+    engine.defineGoal('promote-pending-feedback');
+    const { advanced } = await engine.autoAdvance();
+    expect(advanced).toContain('promote-pending-feedback');
+
+    // Corroborated (2 clients) moved upstream; single-client stayed local
+    expect(engine.state.data.upstream.platformPreferences['web-backend']).toBe('native');
+    const carol = engine.clients()['carol'];
+    expect(carol.feedback.find((f) => f.value.includes('docker'))?.promoted).toBeFalsy();
+  });
+
+  it("promote-feedback: a custom model may promote single-client feedback under 'agent-decides'", async () => {
+    const trusting: JudgmentModel = {
+      name: 'trusting',
+      decide: <T extends string>(q: JudgmentQuestion<T>) =>
+        Promise.resolve<Judgment<T>>({
+          choice: 'promote' as T,
+          confidence: 0.7,
+          model: 'trusting',
+        }),
+    };
+    const engine = new UniversalEngine({
+      statePath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'univ-promote-trust-')), 's.json'),
+      judgmentModel: trusting,
+      decisionPolicy: { promotionThreshold: 'agent-decides', judgmentModel: 'trusting' },
+    });
+
+    engine.feedback('solo', 'output-style', 'go=explicit-types');
+    engine.defineGoal('promote-pending-feedback');
+    await engine.autoAdvance();
+
+    expect(engine.state.data.upstream.outputStyles['go']).toBe('explicit-types');
+    expect(engine.clients()['solo'].feedback[0].promoted).toBe(true);
   });
 });
 
