@@ -638,6 +638,25 @@ describe('Engine analysis and project detection', () => {
     fs.rmSync(hsDir, { recursive: true, force: true });
   });
 
+  it('builds a real multi-package go module (the sibling shopping-list project)', async () => {
+    const sibling = path.join(__dirname, '..', '..', 'shopping-list');
+    if (!fs.existsSync(path.join(sibling, 'go.mod'))) {
+      return console.warn('skipping: sibling shopping-list project not found');
+    }
+    const go = registry.get('go')!;
+    if (!go.info.available) return console.warn('skipping: go unavailable');
+
+    const project = await registry.detectProject(sibling);
+    expect(project!.ecosystem).toBe('go');
+    // cmd/<name>/main.go entry points are detected
+    expect(project!.entryPoints).toEqual(
+      expect.arrayContaining(['cmd/server/main.go'])
+    );
+
+    const build = await engine.build(sibling);
+    expect(build.result.ok).toBe(true);
+  }, 300_000);
+
   it('refuses to build unrecognized project directories', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proj-empty-'));
     await expect(engine.build(dir)).rejects.toThrow(/No recognizable project/i);

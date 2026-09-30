@@ -172,6 +172,20 @@ export const DOMAIN_CATALOG: DomainSpec[] = [
       'consumption rates, producing shopping lists and waste alerts ' +
       '(modeled on github.com/JoachimTislov/foodsavr)',
   },
+  {
+    id: 'recipes',
+    name: 'Recipes / Meal Planning',
+    keywords: [
+      'recipe', 'ingredients', 'servings', 'cook', 'bake', 'prepare',
+      'meal schedule', 'cuisine', 'dish',
+    ],
+    defaultPlatform: 'native',
+    defaultOutputMode: 'run',
+    description:
+      'Recipes composed into meal plans and foodSavr workflow specs: ' +
+      'scheduled meals with servings-scaled ingredient quantities feeding ' +
+      'the food-tracking shopping-list workflow',
+  },
 ];
 
 // ============================================================================

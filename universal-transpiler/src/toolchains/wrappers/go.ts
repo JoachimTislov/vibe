@@ -8,6 +8,7 @@
  * - frameworks: gin, echo, fiber, chi, cobra, k8s operators
  */
 
+import * as fs from 'fs';
 import * as path from 'path';
 import type {
   CompileOptions,
@@ -129,7 +130,9 @@ export class GoToolchain implements Toolchain {
     }
 
     const env = this.platformEnv(options.platform || 'native', options.env);
-    const args = ['build', ...(options.release ? ['-ldflags', '-s -w'] : [])];
+    // ./... builds every package: the module root may hold no Go files
+    // when the layout is cmd/internal based
+    const args = ['build', './...', ...(options.release ? ['-ldflags', '-s -w'] : [])];
     if (options.buildTarget) {
       // allow GOOS/GOARCH override via buildTarget like "windows/amd64"
       const [goos, goarch] = options.buildTarget.split('/');
@@ -160,6 +163,18 @@ export class GoToolchain implements Toolchain {
     const entryPoints: string[] = [];
     for (const candidate of ['main.go', 'cmd/main.go']) {
       if (fileExists(path.join(projectDir, candidate))) entryPoints.push(candidate);
+    }
+    // cmd/<name>/main.go layout (cli/server/web style projects)
+    const cmdDir = path.join(projectDir, 'cmd');
+    if (dirExists(cmdDir)) {
+      try {
+        for (const sub of fs.readdirSync(cmdDir)) {
+          const entry = path.join('cmd', sub, 'main.go');
+          if (fileExists(path.join(projectDir, entry))) entryPoints.push(entry);
+        }
+      } catch {
+        // unreadable cmd dir: skip
+      }
     }
 
     return {
