@@ -22,6 +22,7 @@ const CLI = path.join(ROOT, 'bin', 'cli.js');
 
 let workDir: string;
 let statePath: string;
+let vaultStatePath: string;
 let dockerAvailable = false;
 let rustAvailable = false;
 
@@ -107,6 +108,21 @@ const BROKEN_DSL = `workflow food-tracking "Broken" {
 }
 `;
 
+const VAULT_DSL = `workflow food-tracking "Vault meals" {
+    reference-date 2026-10-01
+    horizon 3 days
+
+    collection fridge "Fridge" {
+        product Kefir (dairy): 2 expiring 2026-10-03
+        product Quinoa (grains): 1 non-expiring
+    }
+
+    consume Kefir at 1 per day
+
+    meal 2026-10-01 "Kefir bowl" needs Kefir x1
+}
+`;
+
 function fixture(name: string, content: string): string {
   const p = path.join(workDir, name);
   fs.writeFileSync(p, content);
@@ -138,6 +154,10 @@ async function cli(
 beforeAll(async () => {
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'univ-cli-test-'));
   statePath = path.join(workDir, 'state.json');
+  // A separate state file keeps the vault tests hermetic: they define,
+  // ingest and look up their own vocabulary without interference from
+  // the keyword learning the other commands trigger.
+  vaultStatePath = path.join(workDir, 'vault-state.json');
 
   fixture('hello.go', HELLO_GO);
   fixture('fail.go', FAIL_GO);
@@ -147,6 +167,7 @@ beforeAll(async () => {
   fixture('sample.ts', SAMPLE_TS);
   fixture('weekly.dsl', WEEKLY_DSL);
   fixture('broken.dsl', BROKEN_DSL);
+  fixture('vault-meals.dsl', VAULT_DSL);
 
   const goProject = path.join(workDir, 'goproject');
   fs.mkdirSync(goProject);
@@ -563,5 +584,226 @@ describe('CLI workflow', () => {
     const r = await cli(['workflow']);
     expect(r.code).not.toBe(0);
     expect(r.stderr).toContain('workflow requires');
+  }, 60_000);
+});
+
+describe('CLI vault', () => {
+  it('help mentions the vault commands', async () => {
+    const r = await cli(['help']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('vault list');
+    expect(r.stdout).toContain('vault lookup');
+    expect(r.stdout).toContain('vault stats');
+    expect(r.stdout).toContain('vault define');
+    expect(r.stdout).toContain('vault ingest');
+    expect(r.stdout).toContain('vault candidates');
+  }, 30_000);
+
+  it('defines a keyword, lists it by domain and looks it up', async () => {
+    const defined = await cli([
+      'vault',
+      'define',
+      'kale',
+      'food-tracking',
+      '--kind',
+      'entity',
+      '--semantics',
+      'leafy green vegetable',
+      '--confidence',
+      '0.9',
+      '--state',
+      vaultStatePath,
+    ]);
+    expect(defined.code).toBe(0);
+    expect(defined.stdout).toContain('Keyword:     kale');
+    expect(defined.stdout).toContain('Domain:      food-tracking');
+    expect(defined.stdout).toContain('Kind:        entity');
+    expect(defined.stdout).toContain('Confidence:  0.90');
+    expect(defined.stdout).toContain('Source:      learned');
+    expect(defined.stdout).toContain('Semantics:   leafy green vegetable');
+
+    const list = await cli(['vault', 'list', '--domain', 'food-tracking', '--state', vaultStatePath]);
+    expect(list.code).toBe(0);
+    expect(list.stdout).toContain('keyword');
+    expect(list.stdout).toContain('confidence');
+    expect(list.stdout).toMatch(/^kale\s+food-tracking\s+entity\s+0\.90\s+learned/m);
+
+    const lookup = await cli(['vault', 'lookup', 'kale', '--state', vaultStatePath]);
+    expect(lookup.code).toBe(0);
+    expect(lookup.stdout).toContain('food-tracking');
+    expect(lookup.stdout).toContain('entity');
+  }, 60_000);
+
+  it('persists definitions across CLI invocations (durable register)', async () => {
+    // kale was defined by the previous test, in the same state file
+    const lookup = await cli(['vault', 'lookup', 'kale', '--state', vaultStatePath]);
+    expect(lookup.code).toBe(0);
+    expect(lookup.stdout).toContain('food-tracking');
+  }, 60_000);
+
+  it('rejects invalid vault define invocations', async () => {
+    const badKind = await cli([
+      'vault',
+      'define',
+      'x',
+      'food-tracking',
+      '--kind',
+      'nonsense',
+      '--state',
+      vaultStatePath,
+    ]);
+    expect(badKind.code).not.toBe(0);
+    expect(badKind.stderr).toContain('unknown kind');
+
+    const badConfidence = await cli([
+      'vault',
+      'define',
+      'x',
+      'food-tracking',
+      '--confidence',
+      '2',
+      '--state',
+      vaultStatePath,
+    ]);
+    expect(badConfidence.code).not.toBe(0);
+    expect(badConfidence.stderr).toContain('invalid --confidence');
+
+    const missingArgs = await cli(['vault', 'define', 'only-a-keyword', '--state', vaultStatePath]);
+    expect(missingArgs.code).not.toBe(0);
+    expect(missingArgs.stderr).toContain('vault define requires');
+  }, 60_000);
+
+  it('rejects unknown vault subcommands and flags', async () => {
+    const unknown = await cli(['vault', 'frobnicate', '--state', vaultStatePath]);
+    expect(unknown.code).not.toBe(0);
+    expect(unknown.stderr).toContain('unknown vault subcommand');
+    const noSub = await cli(['vault', '--state', vaultStatePath]);
+    expect(noSub.code).not.toBe(0);
+    expect(noSub.stderr).toContain('vault requires a subcommand');
+    const badFlag = await cli(['vault', 'list', '--nope', '--state', vaultStatePath]);
+    expect(badFlag.code).not.toBe(0);
+  }, 60_000);
+
+  it('ingests a DSL document vocabulary into the vault', async () => {
+    const r = await cli([
+      'vault',
+      'ingest',
+      path.join(workDir, 'vault-meals.dsl'),
+      '--client',
+      'acme',
+      '--state',
+      vaultStatePath,
+    ]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('Ingested 5 vocabulary entries into domain food-tracking');
+    expect(r.stdout).toContain('kefir (entity)');
+    expect(r.stdout).toContain('quinoa (entity)');
+    expect(r.stdout).toContain('dairy (entity)');
+    expect(r.stdout).toContain('grains (entity)');
+    expect(r.stdout).toContain('kefir bowl (entity)');
+
+    // The ingested products are now definitions of the food-tracking domain
+    const list = await cli([
+      'vault',
+      'list',
+      '--domain',
+      'food-tracking',
+      '--text',
+      'quinoa',
+      '--state',
+      vaultStatePath,
+    ]);
+    expect(list.code).toBe(0);
+    expect(list.stdout).toMatch(/^quinoa\s+food-tracking\s+entity/m);
+
+    const lookup = await cli(['vault', 'lookup', 'kefir', '--state', vaultStatePath]);
+    expect(lookup.code).toBe(0);
+    expect(lookup.stdout).toContain('food-tracking');
+  }, 60_000);
+
+  it('reports ingest syntax errors as file:line with exit code 1', async () => {
+    const r = await cli(['vault', 'ingest', path.join(workDir, 'broken.dsl'), '--state', vaultStatePath]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/broken\.dsl:2: invalid ISO date "not-a-date"/);
+    expect(r.stderr).not.toMatch(/\n\s+at /);
+  }, 60_000);
+
+  it('fails ingest on a missing file', async () => {
+    const r = await cli(['vault', 'ingest', path.join(workDir, 'nope.dsl'), '--state', vaultStatePath]);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain('file not found');
+  }, 60_000);
+
+  it('prints vault totals by domain, source and kind', async () => {
+    const r = await cli(['vault', 'stats', '--state', vaultStatePath]);
+    expect(r.code).toBe(0);
+    // kale + kefir, dairy, quinoa, grains, kefir bowl = 6 definitions
+    expect(r.stdout).toContain('Definitions:        6');
+    expect(r.stdout).toContain('Pending candidates: 0');
+    expect(r.stdout).toContain('By domain:');
+    expect(r.stdout).toContain('  food-tracking: 6');
+    expect(r.stdout).toContain('By source:');
+    expect(r.stdout).toContain('  learned: 1');
+    expect(r.stdout).toContain('  client-promoted: 5');
+    expect(r.stdout).toContain('By kind:');
+    expect(r.stdout).toContain('  entity: 6');
+  }, 60_000);
+
+  it('filters the vault list by kind and source', async () => {
+    const byKind = await cli(['vault', 'list', '--kind', 'entity', '--state', vaultStatePath]);
+    expect(byKind.code).toBe(0);
+    expect(byKind.stdout).toContain('kefir');
+    const noneKind = await cli(['vault', 'list', '--kind', 'construct', '--state', vaultStatePath]);
+    expect(noneKind.code).toBe(0);
+    expect(noneKind.stdout).toContain('No definitions match.');
+    const bySource = await cli([
+      'vault',
+      'list',
+      '--source',
+      'client-promoted',
+      '--state',
+      vaultStatePath,
+    ]);
+    expect(bySource.code).toBe(0);
+    expect(bySource.stdout).toContain('kefir');
+    expect(bySource.stdout).not.toContain('kale');
+    const badSource = await cli(['vault', 'list', '--source', 'nonsense', '--state', vaultStatePath]);
+    expect(badSource.code).not.toBe(0);
+    expect(badSource.stderr).toContain('unknown source');
+  }, 60_000);
+
+  it('looks up unpromoted client-taught entries with their owner', async () => {
+    const taught = await cli([
+      'feedback',
+      'bob',
+      'keyword-domain',
+      'kombucha=food-tracking',
+      '--state',
+      vaultStatePath,
+    ]);
+    expect(taught.code).toBe(0);
+    expect(taught.stdout).toContain('Promoted:  no');
+
+    const lookup = await cli(['vault', 'lookup', 'kombucha', '--state', vaultStatePath]);
+    expect(lookup.code).toBe(0);
+    expect(lookup.stdout).toContain('food-tracking');
+    expect(lookup.stdout).toContain('bob');
+  }, 60_000);
+
+  it('fails lookup of an unknown keyword with a non-zero exit', async () => {
+    const r = await cli(['vault', 'lookup', 'zzz-not-a-keyword', '--state', vaultStatePath]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('is not defined in any domain');
+  }, 60_000);
+
+  it('lists pending candidates (empty by default, --limit accepted)', async () => {
+    const r = await cli(['vault', 'candidates', '--state', vaultStatePath]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('No pending candidates.');
+    const limited = await cli(['vault', 'candidates', '--limit', '5', '--state', vaultStatePath]);
+    expect(limited.code).toBe(0);
+    const badLimit = await cli(['vault', 'candidates', '--limit', 'x', '--state', vaultStatePath]);
+    expect(badLimit.code).not.toBe(0);
+    expect(badLimit.stderr).toContain('invalid --limit');
   }, 60_000);
 });

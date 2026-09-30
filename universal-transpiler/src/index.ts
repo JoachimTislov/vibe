@@ -135,6 +135,12 @@ export * from './domains/foodsavr';
 export * from './domains/workflow-dsl';
 
 // ============================================================================
+// Definition Vault Exports (the keyword register)
+// ============================================================================
+
+export * from './vault/definition-vault';
+
+// ============================================================================
 // Engine Exports (the universal wrapper facade)
 // ============================================================================
 

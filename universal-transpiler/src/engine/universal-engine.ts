@@ -30,6 +30,8 @@ import {
 } from '../domains/domain-analyzer';
 import { TranspileMatrix, type MatrixTranspileResult } from './transpile-matrix';
 import { PersistentState, getSharedState } from './persistent-state';
+import { DefinitionVault } from '../vault/definition-vault';
+import { parseWorkflowDsl } from '../domains/workflow-dsl';
 import type { FeedbackRecord, Goal } from './persistent-state';
 import type { LLMClient } from '../core/universal-transpiler';
 
@@ -108,6 +110,12 @@ export class UniversalEngine {
   readonly matrix: TranspileMatrix;
   /** Persistent, self-going state: learned definitions, feedback, goals. */
   readonly state: PersistentState;
+  /**
+   * The definition vault: the transpiler's register of keyword
+   * definitions scoped by domain. Domain analysis, learning and client
+   * teaching all flow through it.
+   */
+  readonly vault: DefinitionVault;
   private options: Required<Omit<EngineOptions, 'llm' | 'statePath' | 'learn'>> & {
     llm?: LLMClient;
     statePath?: string;
@@ -123,6 +131,7 @@ export class UniversalEngine {
       ? new PersistentState(options.statePath, options.learn)
       : getSharedState();
     this.state.load();
+    this.vault = new DefinitionVault(this.state);
 
     this.options = {
       defaultPlatform: 'auto',
@@ -169,7 +178,7 @@ export class UniversalEngine {
       declaredDomain: request.domain,
       declaredPlatform: request.platform || (this.options.defaultPlatform as PlatformTarget),
       language,
-      learnedKeywords: { ...this.state.learnedKeywordMap(), ...clientKeywords },
+      learnedKeywords: { ...this.vault.scoringMap(), ...clientKeywords },
       platformOverrides: this.validatedPlatformOverrides({
         ...this.state.data.upstream.platformPreferences,
         ...clientOverrides,
@@ -406,6 +415,77 @@ export class UniversalEngine {
     });
 
     return { project, result };
+  }
+
+  // ==========================================================================
+  // Vocabulary ingestion: documents enrich the vault
+  // ==========================================================================
+
+  /**
+   * Ingest a workflow DSL document's vocabulary into the definition vault.
+   * Product names, categories and meal names become persisted entity
+   * definitions of their domain — so any future source mentioning them
+   * scores toward that domain. This is the register being fed by the
+   * high-level language definitions themselves.
+   *
+   * Returns the records created (or updated) by this ingestion.
+   */
+  ingestDocumentVocabulary(
+    dslSource: string,
+    options: { clientId?: string } = {}
+  ): { domain: string; keyword: string; kind: string }[] {
+    const doc = parseWorkflowDsl(dslSource);
+    const created: { domain: string; keyword: string; kind: string }[] = [];
+
+    for (const collection of doc.spec.collections) {
+      for (const product of collection.products) {
+        const existing = this.vault.lookupInDomain(product.name, doc.domain);
+        if (existing) {
+          this.vault.recordEncounter(product.name, doc.domain);
+        } else {
+          this.vault.define(product.name, doc.domain, {
+            kind: 'entity',
+            semantics: `food product tracked in collection "${collection.name}"`,
+            confidence: 0.75,
+            taughtBy: options.clientId,
+          });
+        }
+        created.push({ domain: doc.domain, keyword: product.name, kind: 'entity' });
+
+        if (product.category) {
+          const catExisting = this.vault.lookupInDomain(product.category, doc.domain);
+          if (!catExisting) {
+            this.vault.define(product.category, doc.domain, {
+              kind: 'entity',
+              semantics: `product category (seen on ${product.name})`,
+              confidence: 0.7,
+              taughtBy: options.clientId,
+            });
+            created.push({ domain: doc.domain, keyword: product.category, kind: 'entity' });
+          }
+        }
+      }
+    }
+
+    for (const meal of doc.spec.mealPlan ?? []) {
+      if (!meal.name) continue;
+      if (!this.vault.lookupInDomain(meal.name, doc.domain)) {
+        this.vault.define(meal.name, doc.domain, {
+          kind: 'entity',
+          semantics: 'planned meal',
+          confidence: 0.7,
+          taughtBy: options.clientId,
+        });
+        created.push({ domain: doc.domain, keyword: meal.name, kind: 'entity' });
+      }
+    }
+
+    this.state.logProgress(
+      'keyword-learned',
+      `ingested ${created.length} vocabulary entries from workflow document "${doc.title}"`
+    );
+    this.state.save();
+    return created;
   }
 
   // ==========================================================================

@@ -5,6 +5,28 @@ internally developed state decides the optimal output. Everything the system
 learns persists to disk; every capability below is proven by executing real
 code.
 
+## The reframe: a definition vault
+
+The transpiler IS a register (vault) of keyword definitions, scoped by
+domain (`src/vault/definition-vault.ts`). Every keyword the system
+encounters — built-in, learned from repeated encounters, taught by
+clients, promoted from feedback, or declared in DSL documents — is a
+first-class vault record:
+
+```ts
+{ keyword, domain, kind: construct|entity|action|platform-hint|style|term,
+  semantics, hint, confidence, source, occurrences, taughtBy }
+```
+
+- **Storage is domain-scoped**: a keyword can be defined independently in
+  several domains (`pipeline@ml`, `pipeline@data`); records persist in the
+  state file under `<keyword>::<domain>` keys.
+- **Everything consumes the vault**: domain analysis scores sources by
+  vault lookups; the learning loop writes encounters into it; client
+  feedback (`keyword-domain`) teaches it; DSL documents ingest their
+  vocabulary into it (`engine.ingestDocumentVocabulary`).
+- **CLI**: `universal-transpiler vault list|lookup|stats|define|ingest|candidates`.
+
 ## The pipeline
 
 ```

@@ -107,11 +107,12 @@ describe('Keyword learning from source', () => {
     await engine.analyze(WEB_BACKEND_LEARNING_SOURCE);
     expect(engine.state.data.candidates.fluxinator).toBeDefined();
     expect(engine.state.data.candidates.fluxinator['web-backend']).toBeGreaterThanOrEqual(1);
-    expect(engine.state.data.keywords.fluxinator).toBeUndefined();
+    expect(engine.state.data.keywords['fluxinator::web-backend']).toBeUndefined();
 
     // Second encounter: evidence threshold met -> persistent definition
     await engine.analyze(WEB_BACKEND_LEARNING_SOURCE);
-    const def = engine.state.data.keywords.fluxinator;
+    // Keywords are stored under domain-scoped keys ("<keyword>::<domain>")
+    const def = engine.state.data.keywords['fluxinator::web-backend'];
     expect(def).toBeDefined();
     expect(def!.domain).toBe('web-backend');
     expect(def!.source).toBe('learned');
@@ -119,8 +120,8 @@ describe('Keyword learning from source', () => {
 
     // The definition is persisted to the state file on disk
     const onDisk = stateOnDisk(engine) as { keywords: Record<string, { domain: string }> };
-    expect(onDisk.keywords.fluxinator).toBeDefined();
-    expect(onDisk.keywords.fluxinator.domain).toBe('web-backend');
+    expect(onDisk.keywords['fluxinator::web-backend']).toBeDefined();
+    expect(onDisk.keywords['fluxinator::web-backend'].domain).toBe('web-backend');
 
     // A brand new engine on the same path loads the learned definition
     const reborn = reloadEngine(engine);

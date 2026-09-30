@@ -37,6 +37,14 @@ export interface KeywordDefinition {
   firstSeen: number;
   lastSeen: number;
   occurrences: number;
+  /** Vault enrichment (persisted): what the keyword denotes in the domain */
+  kind?: string;
+  /** Vault enrichment (persisted): human-readable semantics */
+  semantics?: string;
+  /** Vault enrichment (persisted): a concrete hint consumers act on */
+  hint?: string;
+  /** Vault enrichment (persisted): which client taught this definition */
+  taughtBy?: string;
 }
 
 export interface FeedbackRecord {
@@ -218,8 +226,8 @@ export class PersistentState {
     const now = Date.now();
 
     for (const id of identifiers) {
-      // Known keyword: bump occurrence stats (persisted)
-      const existing = this.data.keywords[id];
+      // Known keyword (defined in ANY domain): bump occurrence stats
+      const existing = Object.values(this.data.keywords).find((d) => d.keyword === id);
       if (existing) {
         existing.occurrences += 1;
         existing.lastSeen = now;
@@ -253,7 +261,8 @@ export class PersistentState {
           lastSeen: now,
           occurrences: total,
         };
-        this.data.keywords[id] = def;
+        // Domain-scoped key: one keyword may be defined per domain
+        this.data.keywords[`${id}::${topDomain}`] = def;
         delete this.data.candidates[id];
         this.logProgress('keyword-learned', `"${id}" -> domain ${topDomain} (after ${total} encounters)`);
         learned.push(def);
@@ -271,9 +280,15 @@ export class PersistentState {
    * Persisted immediately — this is the "persist desired functionality and
    * definitions upon new encounter" contract.
    */
+  /** Storage key for a domain-scoped keyword record. */
+  static keywordKey(keyword: string, domain: string): string {
+    return `${keyword.toLowerCase()}::${domain}`;
+  }
+
   defineKeyword(keyword: string, domain: string, source: KeywordSource = 'client-promoted', confidence = 0.8): KeywordDefinition {
     const now = Date.now();
-    const existing = this.data.keywords[keyword.toLowerCase()];
+    const key = PersistentState.keywordKey(keyword, domain);
+    const existing = this.data.keywords[key];
     const def: KeywordDefinition = {
       keyword: keyword.toLowerCase(),
       domain,
@@ -282,25 +297,39 @@ export class PersistentState {
       firstSeen: existing?.firstSeen ?? now,
       lastSeen: now,
       occurrences: (existing?.occurrences ?? 0) + 1,
+      kind: existing?.kind,
+      semantics: existing?.semantics,
+      hint: existing?.hint,
+      taughtBy: existing?.taughtBy,
     };
-    this.data.keywords[def.keyword] = def;
+    this.data.keywords[key] = def;
     delete this.data.candidates[def.keyword];
     this.logProgress('keyword-learned', `"${def.keyword}" defined as ${domain} (${source})`);
     this.save();
     return def;
   }
 
-  /** Learned keyword definitions as a scoring map for domain analysis. */
+  /**
+   * Learned keyword definitions as a scoring map for domain analysis.
+   * When a keyword is defined in several domains, the analyzer scores it
+   * in EACH domain it is defined in — so the map is flattened to the
+   * highest-confidence definition per keyword here, while the vault
+   * exposes the full domain-scoped records for consumers that need them.
+   */
   learnedKeywordMap(): Record<string, { domain: string; confidence: number }> {
     const map: Record<string, { domain: string; confidence: number }> = {};
     for (const def of Object.values(this.data.keywords)) {
-      if (def.source !== 'builtin') map[def.keyword] = { domain: def.domain, confidence: def.confidence };
+      if (def.source === 'builtin') continue;
+      const current = map[def.keyword];
+      if (!current || def.confidence > current.confidence) {
+        map[def.keyword] = { domain: def.domain, confidence: def.confidence };
+      }
     }
     return map;
   }
 
   getKeywordDefinition(keyword: string): KeywordDefinition | undefined {
-    return this.data.keywords[keyword.toLowerCase()];
+    return Object.values(this.data.keywords).find((d) => d.keyword === keyword.toLowerCase());
   }
 
   // ==========================================================================
@@ -378,7 +407,13 @@ export class PersistentState {
         // value format: "<keyword>=<domain>"
         const [keyword, domain] = value.split('=');
         if (keyword && domain) {
-          this.defineKeyword(keyword.trim(), domain.trim(), 'client-promoted');
+          const def = this.defineKeyword(keyword.trim(), domain.trim(), 'client-promoted');
+          // Remember the first client that taught this definition
+          const firstTeacher = Object.values(this.data.clients)
+            .flatMap((client) => client.feedback)
+            .filter((fb) => fb.subject === subject && fb.value === value)
+            .sort((a, b) => a.createdAt - b.createdAt)[0];
+          def.taughtBy = firstTeacher?.clientId;
         }
         break;
       }

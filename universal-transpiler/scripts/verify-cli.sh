@@ -117,6 +117,22 @@ workflow food-tracking "Broken" {
 }
 EOF
 
+cat > "$TMP/vault-meals.dsl" <<'EOF'
+workflow food-tracking "Vault meals" {
+    reference-date 2026-10-01
+    horizon 3 days
+
+    collection fridge "Fridge" {
+        product Kefir (dairy): 2 expiring 2026-10-03
+        product Quinoa (grains): 1 non-expiring
+    }
+
+    consume Kefir at 1 per day
+
+    meal 2026-10-01 "Kefir bowl" needs Kefir x1
+}
+EOF
+
 # ---------------------------------------------------------------------------
 # 1. status (via npm start, the package.json entry point)
 # ---------------------------------------------------------------------------
@@ -321,6 +337,62 @@ grep -q "$TMP/broken.dsl:2:" "$TMP/workflow-bad.err" || fail "workflow bad: file
 grep -q 'invalid ISO date' "$TMP/workflow-bad.err" || fail "workflow bad: error message missing on stderr"
 if grep -q '    at ' "$TMP/workflow-bad.err"; then fail "workflow bad: stack trace leaked"; fi
 echo "ok - syntax error reported as file:line with exit code 1: $(cat "$TMP/workflow-bad.err")"
+pass=$((pass + 1))
+
+# ---------------------------------------------------------------------------
+# 6d. vault: define, list --domain, lookup, ingest, stats, candidates
+# ---------------------------------------------------------------------------
+VAULT_STATE="$TMP/vault-state.json"
+
+banner "vault define + list --domain + lookup"
+node "$CLI" vault define kale food-tracking \
+  --kind entity --semantics "leafy green vegetable" --confidence 0.9 \
+  --state "$VAULT_STATE" > "$TMP/vault-define.out" 2> "$TMP/vault-define.err"
+grep -q 'Keyword:     kale' "$TMP/vault-define.out" || fail "vault define: record not printed"
+grep -q 'Source:      learned' "$TMP/vault-define.out" || fail "vault define: source missing"
+node "$CLI" vault list --domain food-tracking --state "$VAULT_STATE" \
+  > "$TMP/vault-list.out" 2> "$TMP/vault-list.err"
+grep -q '^kale' "$TMP/vault-list.out" || fail "vault list: defined keyword missing from its domain"
+node "$CLI" vault lookup kale --state "$VAULT_STATE" > "$TMP/vault-lookup.out" 2> "$TMP/vault-lookup.err"
+grep -q 'food-tracking' "$TMP/vault-lookup.out" || fail "vault lookup: domain missing"
+grep -q 'entity' "$TMP/vault-lookup.out" || fail "vault lookup: kind missing"
+echo "ok - vault define/list/lookup round-trip:"
+sed 's/^/    /' "$TMP/vault-define.out"
+pass=$((pass + 1))
+
+banner "vault ingest (DSL vocabulary -> entity definitions)"
+node "$CLI" vault ingest "$TMP/vault-meals.dsl" --client acme --state "$VAULT_STATE" \
+  > "$TMP/vault-ingest.out" 2> "$TMP/vault-ingest.err"
+grep -q 'Ingested 5 vocabulary entries into domain food-tracking' "$TMP/vault-ingest.out" \
+  || fail "vault ingest: entry count wrong"
+grep -q '^  kefir (entity)' "$TMP/vault-ingest.out" || fail "vault ingest: kefir not registered"
+grep -q '^  quinoa (entity)' "$TMP/vault-ingest.out" || fail "vault ingest: quinoa not registered"
+grep -q '^  dairy (entity)' "$TMP/vault-ingest.out" || fail "vault ingest: category not registered"
+node "$CLI" vault list --domain food-tracking --text quinoa --state "$VAULT_STATE" \
+  > "$TMP/vault-list2.out" 2> "$TMP/vault-list2.err"
+grep -q '^quinoa' "$TMP/vault-list2.out" || fail "vault ingest: quinoa not listed under food-tracking"
+node "$CLI" vault lookup kefir --state "$VAULT_STATE" > "$TMP/vault-lookup2.out" 2> "$TMP/vault-lookup2.err"
+grep -q 'food-tracking' "$TMP/vault-lookup2.out" || fail "vault ingest: kefir not lookup-able"
+node "$CLI" vault stats --state "$VAULT_STATE" > "$TMP/vault-stats.out" 2> "$TMP/vault-stats.err"
+grep -q 'Definitions:        6' "$TMP/vault-stats.out" || fail "vault stats: definition total wrong"
+grep -q '  food-tracking: 6' "$TMP/vault-stats.out" || fail "vault stats: domain total missing"
+grep -q '  client-promoted: 5' "$TMP/vault-stats.out" || fail "vault stats: source totals missing"
+grep -q 'Pending candidates: 0' "$TMP/vault-stats.out" || fail "vault stats: pending candidate count missing"
+node "$CLI" vault candidates --state "$VAULT_STATE" > "$TMP/vault-candidates.out" 2> "$TMP/vault-candidates.err"
+grep -q 'pending' "$TMP/vault-candidates.out" || fail "vault candidates: output missing"
+echo "ok - DSL vocabulary ingested into the vault:"
+sed 's/^/    /' "$TMP/vault-ingest.out"
+sed 's/^/    /' "$TMP/vault-stats.out"
+pass=$((pass + 1))
+
+banner "vault lookup of an unpromoted client-taught keyword"
+node "$CLI" feedback bob keyword-domain "kombucha=food-tracking" --state "$VAULT_STATE" \
+  > /dev/null 2>&1
+node "$CLI" vault lookup kombucha --state "$VAULT_STATE" > "$TMP/vault-lookup3.out" 2> "$TMP/vault-lookup3.err"
+grep -q 'food-tracking' "$TMP/vault-lookup3.out" || fail "vault lookup: taught keyword domain missing"
+grep -q 'bob' "$TMP/vault-lookup3.out" || fail "vault lookup: teaching client (owner) missing"
+echo "ok - unpromoted client-taught entry surfaced with its owner:"
+sed 's/^/    /' "$TMP/vault-lookup3.out"
 pass=$((pass + 1))
 
 # ---------------------------------------------------------------------------
