@@ -23,6 +23,8 @@ import {
   SCAFFOLD_DOMAINS,
   type ScaffoldTarget,
 } from './scaffolds';
+import { parseSystemDsl, systemSpecToDsl } from '../domains/system-dsl';
+import { generateSystemCode, type SystemTarget } from '../domains/system-codegen';
 
 export class RuntimeDomainAgent implements DomainAgent {
   readonly id: string;
@@ -38,6 +40,15 @@ export class RuntimeDomainAgent implements DomainAgent {
 
   canHandle(input: { source: string; domain: string; interpretation: InterpretationReport }): boolean {
     return input.domain.toLowerCase() === this.domain.toLowerCase();
+  }
+
+  /** 1 when the input is a system declaration for this domain. */
+  inputAffinity(source: string): number {
+    try {
+      return parseSystemDsl(source).domain === this.domain ? 1 : 0;
+    } catch {
+      return 0;
+    }
   }
 
   async flow(request: DomainAgentFlowRequest): Promise<DomainAgentFlowResult> {
@@ -60,9 +71,32 @@ export class RuntimeDomainAgent implements DomainAgent {
 
     if (wantsScaffold || produce === 'scaffold' || produce === 'code') {
       const target = (request.codeTarget ?? 'javascript') as ScaffoldTarget;
-      const code = generateScaffold(this.domain, target);
 
-      // No deterministic scaffold for this domain/target: the LLM tier
+      // A system declaration for this domain outranks both the scaffold
+      // and the LLM: the 5GL document IS the specification of the
+      // artifact; codegen is deterministic from it.
+      let systemCode: string | undefined;
+      let systemStrategy: 'system-dsl' | undefined;
+      try {
+        const doc = parseSystemDsl(request.source);
+        if (doc.domain === this.domain) {
+          systemCode = generateSystemCode(doc.spec, target as SystemTarget);
+          if (systemCode !== undefined) {
+            systemStrategy = 'system-dsl';
+            notes.push(`compiled the system declaration "${doc.title}" into ${target}`);
+          } else {
+            notes.push(
+              `system declaration "${doc.title}" has no ${target} codegen; using the domain scaffold`
+            );
+          }
+        }
+      } catch {
+        // not a system document; fall through to the scaffold tier
+      }
+
+      const code = systemCode ?? generateScaffold(this.domain, target);
+
+      // No deterministic path for this domain/target: the LLM tier
       // generates the domain code on the fly (still under the resolved
       // standards; the judgment layer stays reserved for decisions).
       const finalCode =
@@ -72,24 +106,28 @@ export class RuntimeDomainAgent implements DomainAgent {
 
       if (finalCode === undefined) {
         notes.push(
-          `no ${target} scaffold for domain "${this.domain}" and no LLM configured; executed the source instead`
+          `no ${target} path for domain "${this.domain}" and no LLM configured; executed the source instead`
         );
       } else {
         notes.push(
-          code !== undefined
-            ? `generated ${target} scaffold for domain "${this.domain}"`
-            : `generated ${target} domain code for "${this.domain}" via the LLM tier`
+          systemStrategy === 'system-dsl'
+            ? `system declaration -> ${target} code`
+            : code !== undefined
+              ? `generated ${target} scaffold for domain "${this.domain}"`
+              : `generated ${target} domain code for "${this.domain}" via the LLM tier`
         );
         // Standards of the produced artifact: the target language's
         // ecosystem standard, overridden by the scope's standards
         const scope = request.scope ? this.engine.getScope(request.scope) : undefined;
         const standards: CodeStandards = resolveStandards(target, scope?.codeStandards);
         const produced: DomainAgentProduced = {
-          kind: code !== undefined ? 'scaffold' : 'generated-code',
+          kind: systemStrategy === 'system-dsl' ? 'generated-code' : code !== undefined ? 'scaffold' : 'generated-code',
           payload: {
             domain: this.domain,
             target,
-            strategy: code !== undefined ? 'deterministic-scaffold' : 'llm-generated',
+            strategy:
+              systemStrategy ??
+              (code !== undefined ? 'deterministic-scaffold' : 'llm-generated'),
           },
           text: finalCode,
         };
@@ -106,7 +144,8 @@ export class RuntimeDomainAgent implements DomainAgent {
     }
 
     if (produce === 'dsl') {
-      const text = JSON.stringify(
+      // A system declaration re-emits as canonical DSL text
+      let text = JSON.stringify(
         {
           domain: this.domain,
           matchedKeywords: interpretation.analysis.matchedKeywords,
@@ -117,6 +156,12 @@ export class RuntimeDomainAgent implements DomainAgent {
         null,
         2
       );
+      try {
+        const doc = parseSystemDsl(request.source);
+        if (doc.domain === this.domain) text = systemSpecToDsl(doc.spec);
+      } catch {
+        // not a system document; the summary above stands
+      }
       return {
         agent: this.id,
         domain: this.domain,

@@ -112,7 +112,7 @@ export class GoToolchain implements Toolchain {
     const entryFile = options.entryFile || 'main.go';
     const filePath = writeSourceFile(workDir, entryFile, source);
 
-    return runCommand('go', ['run', ...(options.extraArgs || []), filePath], {
+    return runCommand('go', ['run', ...(options.extraArgs || []), filePath, ...(options.args || [])], {
       cwd: workDir,
       env: options.env,
       timeoutMs: options.timeoutMs || 60_000,
