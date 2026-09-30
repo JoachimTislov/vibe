@@ -49,23 +49,27 @@ export interface MistralRequest {
 }
 
 export interface MistralResponse {
-  output: {
-    id: string;
-    model: string;
-    created: number;
-    choices: Array<{
-      index: number;
-      message: {
-        role: string;
-        content: string;
-      };
-      finish_reason: string;
-    }>;
-    usage: {
-      prompt_tokens: number;
-      completion_tokens: number;
-      total_tokens: number;
+  /** Live API shape: choices/usage at the top level */
+  id?: string;
+  model?: string;
+  created?: number;
+  choices?: Array<{
+    index: number;
+    message: {
+      role: string;
+      content: string;
     };
+    finish_reason: string;
+  }>;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+  /** Legacy wrapped shape kept for compatibility */
+  output?: {
+    choices: MistralResponse['choices'];
+    usage: MistralResponse['usage'];
   };
 }
 
@@ -139,13 +143,17 @@ export class MistralClient implements LLMClient {
 
     try {
       const response = await this.fetchMistral(request);
+      // The live API returns choices/usage at the top level; some older
+      // shapes wrapped them in `output`. Support both.
+      const choices = (response as any).choices ?? (response as any).output?.choices;
+      const usage = (response as any).usage ?? (response as any).output?.usage;
       const result: LLMResponse = {
-        content: response.output.choices[0]?.message?.content || '',
-        finishReason: response.output.choices[0]?.finish_reason || 'error',
+        content: choices?.[0]?.message?.content || '',
+        finishReason: choices?.[0]?.finish_reason || 'error',
         usage: {
-          promptTokens: response.output.usage.prompt_tokens,
-          completionTokens: response.output.usage.completion_tokens,
-          totalTokens: response.output.usage.total_tokens,
+          promptTokens: usage?.prompt_tokens ?? 0,
+          completionTokens: usage?.completion_tokens ?? 0,
+          totalTokens: usage?.total_tokens ?? 0,
         },
       };
 

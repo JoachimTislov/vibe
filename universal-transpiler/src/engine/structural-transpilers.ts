@@ -9,6 +9,15 @@
  * Supported pairs:
  * - rust -> go   (functions, structs, control flow, printing, basics)
  * - haskell -> javascript (module main, do-blocks, simple functions)
+ * - python -> javascript (print, def, control flow, f-strings, basics)
+ * - javascript/typescript -> python (console.log, function/arrow defs,
+ *   if/elif/else, for-range/for-of/for-in, while, template literals ->
+ *   f-strings, let/const/var, booleans/null, and/or/not, .length -> len(),
+ *   object literals -> dicts, comments, returns)
+ *
+ * TypeScript input is lowered to JavaScript first by the native TS->JS step
+ * (typescript compiler API) in the transpile matrix; jsToPython then runs
+ * on the JavaScript.
  */
 
 // ============================================================================
@@ -771,6 +780,975 @@ export function pythonToJavaScript(source: string): StructuralTranspileResult {
   // If a main() function exists, call it (python convention)
   if (out.some((l) => /^\s*function main\(/.test(l)) && !out.some((l) => /^\s*main\(\);/.test(l))) {
     out.push('', 'main();');
+  }
+
+  return {
+    code: out.join('\n'),
+    converted: Array.from(new Set(converted)),
+    unsupported: Array.from(new Set(unsupported)),
+  };
+}
+
+// ============================================================================
+// JavaScript/TypeScript -> Python
+// ============================================================================
+
+/** Flag collector shared by the expression-conversion helpers. */
+interface JsPyContext {
+  converted: string[];
+  unsupported: string[];
+}
+
+/** Split an expression into code / string-literal / template-literal parts. */
+function tokenizeJs(expr: string): Array<{ kind: 'code' | 'str' | 'tpl'; text: string }> {
+  const segs: Array<{ kind: 'code' | 'str' | 'tpl'; text: string }> = [];
+  let code = '';
+  let i = 0;
+  while (i < expr.length) {
+    const ch = expr[i];
+    if (ch === '"' || ch === "'") {
+      let j = i + 1;
+      while (j < expr.length) {
+        if (expr[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (expr[j] === ch) {
+          j++;
+          break;
+        }
+        j++;
+      }
+      if (code) {
+        segs.push({ kind: 'code', text: code });
+        code = '';
+      }
+      segs.push({ kind: 'str', text: expr.slice(i, j) });
+      i = j;
+      continue;
+    }
+    if (ch === '`') {
+      let j = i + 1;
+      while (j < expr.length) {
+        if (expr[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (expr[j] === '`') {
+          j++;
+          break;
+        }
+        if (expr[j] === '$' && expr[j + 1] === '{') {
+          let depth = 1;
+          j += 2;
+          while (j < expr.length && depth > 0) {
+            if (expr[j] === '{') depth++;
+            else if (expr[j] === '}') {
+              depth--;
+              if (depth === 0) {
+                j++;
+                break;
+              }
+            }
+            j++;
+          }
+          continue;
+        }
+        j++;
+      }
+      if (code) {
+        segs.push({ kind: 'code', text: code });
+        code = '';
+      }
+      segs.push({ kind: 'tpl', text: expr.slice(i, j) });
+      i = j;
+      continue;
+    }
+    code += ch;
+    i++;
+  }
+  if (code) segs.push({ kind: 'code', text: code });
+  return segs;
+}
+
+/** Split at a separator character, ignoring strings and nested brackets. */
+function splitTopLevel(text: string, sep: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let current = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      current += ch;
+      if (ch === '\\') {
+        current += text[i + 1] || '';
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    if (ch === sep && depth === 0) {
+      parts.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+/** Net brace delta of a line, ignoring braces inside strings. */
+function netBraces(text: string): number {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+  }
+  return depth;
+}
+
+/** When text is exactly one balanced {...} (or [...]) group, return its inside. */
+function balancedInner(text: string, open: string, close: string): string | null {
+  if (!text.startsWith(open) || !text.endsWith(close)) return null;
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === open) depth++;
+    else if (text[i] === close) {
+      depth--;
+      if (depth === 0) return i === text.length - 1 ? text.slice(1, -1) : null;
+    }
+  }
+  return null;
+}
+
+/** Split a line into its code part and its trailing // comment. */
+function stripLineComment(line: string): { code: string; comment: string | null } {
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '/' && line[i + 1] === '/') {
+      return { code: line.slice(0, i).trim(), comment: line.slice(i + 2).trim() };
+    }
+  }
+  return { code: line.trim(), comment: null };
+}
+
+/** Remove string-literal contents so leak scans do not match inside strings. */
+function stripStringsForScan(line: string): string {
+  let outScan = '';
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    outScan += ch;
+  }
+  return outScan;
+}
+
+/** True when the code has a top-level ternary `?` (not `?.` / `??`). */
+function hasTopLevelQuestion(code: string): boolean {
+  let depth = 0;
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i];
+    if ('([{'.includes(ch)) depth++;
+    else if (')]}'.includes(ch)) depth--;
+    else if (
+      ch === '?' &&
+      depth === 0 &&
+      code[i + 1] !== '.' &&
+      code[i + 1] !== '?' &&
+      code[i - 1] !== '?'
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Convert a single top-level ternary; null when there is none. */
+function convertTernary(code: string, ctx: JsPyContext): string | null {
+  let depth = 0;
+  let qPos = -1;
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i];
+    if ('([{'.includes(ch)) depth++;
+    else if (')]}'.includes(ch)) depth--;
+    else if (
+      ch === '?' &&
+      depth === 0 &&
+      code[i + 1] !== '.' &&
+      code[i + 1] !== '?' &&
+      code[i - 1] !== '?'
+    ) {
+      qPos = i;
+      break;
+    }
+  }
+  if (qPos < 0) return null;
+
+  let cPos = -1;
+  depth = 0;
+  for (let i = qPos + 1; i < code.length; i++) {
+    const ch = code[i];
+    if ('([{'.includes(ch)) depth++;
+    else if (')]}'.includes(ch)) depth--;
+    else if (ch === ':' && depth === 0) {
+      cPos = i;
+      break;
+    }
+  }
+  if (cPos < 0) {
+    ctx.unsupported.push(`ternary: ${code.trim().slice(0, 50)}`);
+    return null;
+  }
+
+  const cond = code.slice(0, qPos).trim();
+  const a = code.slice(qPos + 1, cPos).trim();
+  const b = code.slice(cPos + 1).trim();
+  if (hasTopLevelQuestion(cond) || hasTopLevelQuestion(a) || hasTopLevelQuestion(b)) {
+    ctx.unsupported.push(`chained-ternary: ${code.trim().slice(0, 60)}`);
+    return null;
+  }
+  ctx.converted.push('ternary');
+  return `(${convertCode(a, ctx)} if ${convertCode(cond, ctx)} else ${convertCode(b, ctx)})`;
+}
+
+const JS_PY_KEYWORDS =
+  /\b(new|this|typeof|instanceof|delete|void|await|yield|throw|function)\b/;
+const JS_PY_GLOBALS =
+  /\b(Math|JSON|Object|Array|Number|String|Boolean|Promise|Date|Map|Set|WeakMap|WeakSet|Symbol|globalThis|window|document|module|exports|require|process|console)\b/;
+
+/**
+ * Convert a code segment (no string/template literals inside) to Python:
+ * ===/!== -> ==/!=, &&/|| -> and/or, ! -> not (parenthesized so Python
+ * precedence cannot change meaning), true/false/null -> True/False/None,
+ * x.length -> len(x) for simple receivers, member access -> subscripts.
+ * Anything outside the subset is flagged, never silently converted.
+ */
+function convertCode(code: string, ctx: JsPyContext): string {
+  const tern = convertTernary(code, ctx);
+  if (tern !== null) return tern;
+
+  let c = code;
+
+  // equality and logical operators
+  c = c.replace(/===/g, '==').replace(/!==/g, '!=');
+  c = c.replace(/&&/g, ' and ').replace(/\|\|/g, ' or ');
+
+  // ! -> not; !(...) keeps its parentheses, !atom becomes (not atom) so
+  // `!x == y` cannot silently change meaning under Python precedence.
+  if (/!(?!=)/.test(c)) {
+    ctx.converted.push('not-operator');
+    c = c.replace(/!(?!=)\s*(?=\()/g, 'not ');
+    c = c.replace(
+      /!(?!=)\s*([A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:\s*\[[^\][]*\])*)/g,
+      (_all: string, atom: string) => `(not ${atom})`
+    );
+    c = c.replace(/!(?!=)\s*(\d+(?:\.\d+)?)/g, (_all: string, num: string) => `(not ${num})`);
+    if (/!(?!=)/.test(c)) {
+      ctx.unsupported.push(`negation: ${c.trim().slice(0, 50)}`);
+      c = c.replace(/!(?!=)/g, 'not ');
+    }
+  }
+
+  // booleans and null
+  if (/\b(true|false|null|undefined)\b/.test(c)) {
+    ctx.converted.push('boolean-literals');
+    c = c
+      .replace(/\btrue\b/g, 'True')
+      .replace(/\bfalse\b/g, 'False')
+      .replace(/\bnull\b/g, 'None')
+      .replace(/\bundefined\b/g, 'None');
+  }
+
+  // x.length -> len(x) for simple receivers (identifier / call / index)
+  if (/\.length\b/.test(c)) {
+    c = c.replace(
+      /([A-Za-z_$][\w$]*(?:\s*\([^()]*\))?(?:\s*\[[^\][]*\])*)\s*\.length\b/g,
+      (_all: string, base: string) => `len(${base.trim()})`
+    );
+    if (/\.length\b/.test(c)) {
+      ctx.unsupported.push(`member-length: ${c.trim().slice(0, 50)}`);
+    } else {
+      ctx.converted.push('length-to-len');
+    }
+  }
+
+  // constructs the subset cannot express -> flagged
+  const kw = c.match(JS_PY_KEYWORDS);
+  if (kw) ctx.unsupported.push(`js-keyword: ${kw[0]}`);
+  const global = c.match(JS_PY_GLOBALS);
+  if (global) ctx.unsupported.push(`js-global: ${global[0]}`);
+  if (c.includes('...')) ctx.unsupported.push(`spread: ${c.trim().slice(0, 50)}`);
+  if (c.includes('=>')) ctx.unsupported.push(`arrow-function: ${c.trim().slice(0, 50)}`);
+  if (/\+\+/.test(c)) ctx.unsupported.push(`increment-in-expression: ${c.trim().slice(0, 50)}`);
+  if (/\?\?|\?\./.test(c)) {
+    ctx.unsupported.push(`nullish/optional-chaining: ${c.trim().slice(0, 50)}`);
+  }
+  const method = c.match(/\.\s*[A-Za-z_$][\w$]*\s*\(/);
+  if (method) ctx.unsupported.push(`js-method-call: ${method[0]}`);
+  if (/[{}]/.test(c)) ctx.unsupported.push(`inline object/block literal: ${c.trim().slice(0, 50)}`);
+  if (c.includes(';')) ctx.unsupported.push(`multiple-statements: ${c.trim().slice(0, 50)}`);
+
+  // remaining member access -> subscript (dict-style access)
+  if (/\.\s*[A-Za-z_$]/.test(c)) {
+    ctx.converted.push('member-access');
+    c = c.replace(/\.\s*([A-Za-z_$][\w$]*)/g, (_all: string, name: string) => `["${name}"]`);
+  }
+
+  return c;
+}
+
+/** Convert a template literal to a Python f-string (or plain string). */
+function convertTemplate(raw: string, ctx: JsPyContext): string {
+  const body = raw.slice(1, -1);
+  const parts: Array<{ kind: 'lit' | 'expr'; text: string }> = [];
+  let lit = '';
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === '\\') {
+      lit += body.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (ch === '$' && body[i + 1] === '{') {
+      let depth = 1;
+      let j = i + 2;
+      while (j < body.length && depth > 0) {
+        if (body[j] === '{') depth++;
+        else if (body[j] === '}') {
+          depth--;
+          if (depth === 0) {
+            j++;
+            break;
+          }
+        }
+        j++;
+      }
+      parts.push({ kind: 'lit', text: lit });
+      lit = '';
+      parts.push({ kind: 'expr', text: body.slice(i + 2, j - 1) });
+      i = j;
+      continue;
+    }
+    lit += ch;
+    i++;
+  }
+  parts.push({ kind: 'lit', text: lit });
+
+  const literalText = parts.filter((p) => p.kind === 'lit').join('');
+  if (literalText.includes('\n')) ctx.unsupported.push('multiline template literal');
+  let quote = '"';
+  if (literalText.includes('"')) quote = "'";
+  if (literalText.includes("'")) ctx.unsupported.push(`template quote conflict: ${raw.slice(0, 40)}`);
+
+  const hasExpr = parts.some((p) => p.kind === 'expr');
+  let inner = '';
+  for (const part of parts) {
+    if (part.kind === 'lit') {
+      inner += hasExpr ? part.text.replace(/\{/g, '{{').replace(/\}/g, '}}') : part.text;
+      continue;
+    }
+    if (!part.text.trim()) ctx.unsupported.push('empty template interpolation');
+    const conv = convertExpression(part.text, ctx);
+    if (conv.includes('\\') || conv.includes(quote)) {
+      ctx.unsupported.push(`template expression quotes: ${part.text.trim().slice(0, 40)}`);
+    }
+    inner += `{${conv}}`;
+  }
+
+  ctx.converted.push('template-literal');
+  return `${hasExpr ? 'f' : ''}${quote}${inner}${quote}`;
+}
+
+/** Convert a whole expression (strings and templates stay intact). */
+function convertExpression(expr: string, ctx: JsPyContext): string {
+  return tokenizeJs(expr.trim())
+    .map((seg) => {
+      if (seg.kind === 'str') return seg.text;
+      if (seg.kind === 'tpl') return convertTemplate(seg.text, ctx);
+      return convertCode(seg.text, ctx);
+    })
+    .join('');
+}
+
+/** Convert an object literal body to a Python dict; null when unsupported. */
+function convertObjectLiteral(inner: string, ctx: JsPyContext): string | null {
+  const items = splitTopLevel(inner, ',').filter(Boolean);
+  if (items.length === 0) return '{}';
+  const parts: string[] = [];
+  for (const item of items) {
+    const ident = item.match(/^([A-Za-z_$][\w$]*)\s*:\s*([\s\S]+)$/);
+    if (ident) {
+      parts.push(`"${ident[1]}": ${convertValue(ident[2], ctx)}`);
+      continue;
+    }
+    const strKey = item.match(/^("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')\s*:\s*([\s\S]+)$/);
+    if (strKey) {
+      parts.push(`${strKey[1]}: ${convertValue(strKey[2], ctx)}`);
+      continue;
+    }
+    const shorthand = item.match(/^([A-Za-z_$][\w$]*)$/);
+    if (shorthand) {
+      parts.push(`"${shorthand[1]}": ${shorthand[1]}`);
+      continue;
+    }
+    ctx.unsupported.push(`object-literal-entry: ${item.slice(0, 50)}`);
+    return null;
+  }
+  ctx.converted.push('object-literal');
+  return `{${parts.join(', ')}}`;
+}
+
+/** Convert a value position (nested object literals become dicts). */
+function convertValue(value: string, ctx: JsPyContext): string {
+  const v = value.trim();
+  if (v.startsWith('{')) {
+    const nested = balancedInner(v, '{', '}');
+    if (nested !== null) {
+      const dict = convertObjectLiteral(nested, ctx);
+      if (dict !== null) return dict;
+    }
+  }
+  return convertExpression(v, ctx);
+}
+
+/** Parse a parameter list; null when a parameter is outside the subset. */
+function parseParams(text: string, ctx: JsPyContext): string[] | null {
+  const t = text.trim();
+  if (!t) return [];
+  const out: string[] = [];
+  for (const p of splitTopLevel(t, ',')) {
+    const m = p.trim().match(/^([A-Za-z_$][\w$]*)\s*(?:=\s*([\s\S]+))?$/);
+    if (!m) {
+      ctx.unsupported.push(`parameter: ${p.trim().slice(0, 40)}`);
+      return null;
+    }
+    out.push(m[2] !== undefined ? `${m[1]}=${convertExpression(m[2], ctx)}` : m[1]);
+  }
+  return out;
+}
+
+const JS_PY_LEAK =
+  /console\.log|=>|\bfunction\b|\bconst\b|\blet\b|\bvar\b|&&|\|\||===|!==|`|\btrue\b|\bfalse\b|\bnull\b|\bundefined\b|\.length\b|\+\+|\?/;
+
+/**
+ * Deterministic JavaScript -> Python structural transpiler (practical
+ * subset). Brace blocks become indentation; console.log becomes print;
+ * template literals become f-strings; function and arrow declarations
+ * become def; for/while/if/else keep their meaning; let/const/var become
+ * plain assignments. Anything the subset cannot express (classes, async,
+ * try/catch, destructuring, spread, method calls, chained ternaries,
+ * closures capturing mutation...) is flagged in `unsupported` and emitted
+ * as a comment - never as live Python.
+ */
+export function jsToPython(source: string): StructuralTranspileResult {
+  const lines = source.split('\n');
+  const out: string[] = [];
+  const converted: string[] = [];
+  const unsupported: string[] = [];
+  const ctx: JsPyContext = { converted, unsupported };
+
+  // Function scopes (assigned names) for closure-mutation detection.
+  const scopes: Array<Set<string>> = [new Set()];
+  // Open blocks; `filled` drives `pass` insertion for empty bodies.
+  const blocks: Array<{ filled: boolean; fnScope: boolean }> = [];
+  let consumeDepth = 0; // > 0 while an unsupported block construct is skipped
+  let blockComment = false;
+
+  const pad = (depth: number) => ' '.repeat(4 * depth);
+  const curPad = () => pad(blocks.length);
+
+  /** Emit live Python; marks the innermost open block as non-empty. */
+  const emit = (text: string) => {
+    out.push(text);
+    if (blocks.length > 0) blocks[blocks.length - 1].filled = true;
+  };
+  const pushBlock = (fnScope: boolean) => {
+    blocks.push({ filled: false, fnScope });
+  };
+  const closeBlock = () => {
+    const depth = blocks.length;
+    const blk = blocks.pop();
+    if (!blk) {
+      unsupported.push('unbalanced-brace');
+      return;
+    }
+    if (blk.fnScope) scopes.pop();
+    if (!blk.filled) out.push(`${pad(depth)}pass`);
+  };
+  /** Flag a whole block construct; its body is consumed as comments. */
+  const flagBlock = (kind: string, text: string) => {
+    unsupported.push(`${kind}: ${text.slice(0, 60)}`);
+    out.push(`${curPad()}# [unsupported: ${kind}] ${text}`);
+    consumeDepth = 1;
+  };
+  /** Comment a statement out (flags were already pushed). */
+  const commentStatement = (code: string) => {
+    out.push(`${curPad()}# [unsupported] ${code}`);
+  };
+  const flagStatement = (kind: string, code: string) => {
+    unsupported.push(`${kind}: ${code.slice(0, 60)}`);
+    commentStatement(code);
+  };
+  const declare = (name: string) => {
+    scopes[scopes.length - 1].add(name);
+  };
+  /** Assignments must target a name bound in the current scope. */
+  const mutationAllowed = (name: string): boolean => {
+    if (scopes[scopes.length - 1].has(name)) return true;
+    for (let i = 0; i < scopes.length - 1; i++) {
+      if (scopes[i].has(name)) {
+        unsupported.push(`closure-mutation: ${name}`);
+        return false;
+      }
+    }
+    unsupported.push(`undeclared-assignment: ${name}`);
+    return false;
+  };
+
+  for (const raw of lines) {
+    const trimmed = raw.trim();
+
+    // Inside an unsupported block construct: everything becomes a comment
+    if (consumeDepth > 0) {
+      if (trimmed !== '') out.push(`${curPad()}    # [unsupported] ${trimmed}`);
+      else out.push('');
+      consumeDepth += netBraces(trimmed);
+      if (consumeDepth <= 0) consumeDepth = 0;
+      continue;
+    }
+
+    // Block comments (multi-line /* */) pass through as Python comments
+    if (blockComment) {
+      const t = trimmed.replace(/^\*+\s?/, '').replace(/\*\//, '').trim();
+      if (t) out.push(`${curPad()}# ${t}`);
+      if (trimmed.includes('*/')) blockComment = false;
+      continue;
+    }
+
+    // Blank lines and comments pass through
+    if (trimmed === '') {
+      out.push('');
+      continue;
+    }
+    if (trimmed.startsWith('//')) {
+      out.push(`${curPad()}# ${trimmed.replace(/^\/\/\s?/, '')}`);
+      continue;
+    }
+    if (trimmed.startsWith('/*')) {
+      const t = trimmed.replace(/^\/\*+\s?/, '').replace(/\s?\*+\/$/, '').trim();
+      if (t) out.push(`${curPad()}# ${t}`);
+      if (!trimmed.includes('*/')) blockComment = true;
+      continue;
+    }
+
+    // ---- closers and else-continuations ----
+    if (/^\}\s*;?$/.test(trimmed)) {
+      closeBlock();
+      continue;
+    }
+    const elseIfMatch = trimmed.match(/^(?:}\s*)?else\s+if\s*\((.*)\)\s*\{$/);
+    if (elseIfMatch) {
+      if (trimmed.startsWith('}')) closeBlock();
+      emit(`${curPad()}elif ${convertExpression(elseIfMatch[1], ctx)}:`);
+      pushBlock(false);
+      converted.push('elif');
+      continue;
+    }
+    if (/^(?:}\s*)?else\s*\{$/.test(trimmed)) {
+      if (trimmed.startsWith('}')) closeBlock();
+      emit(`${curPad()}else:`);
+      pushBlock(false);
+      converted.push('else');
+      continue;
+    }
+
+    // ---- openers (lines ending with `{`) ----
+    if (/\{$/.test(trimmed)) {
+      if (/^async\b/.test(trimmed) || /^function\s*\*/.test(trimmed)) {
+        flagBlock(trimmed.startsWith('async') ? 'async-function' : 'generator-function', trimmed);
+        continue;
+      }
+      const fnMatch = trimmed.match(/^function\s*([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*\{$/);
+      if (fnMatch) {
+        const before = ctx.unsupported.length;
+        const params = parseParams(fnMatch[2], ctx);
+        if (params === null || ctx.unsupported.length > before) {
+          flagBlock('function-parameters', trimmed);
+          continue;
+        }
+        declare(fnMatch[1]);
+        scopes.push(new Set(params.map((p) => p.split('=')[0].trim())));
+        emit(`${curPad()}def ${fnMatch[1]}(${params.join(', ')}):`);
+        pushBlock(true);
+        converted.push('function');
+        continue;
+      }
+      const arrowDef = trimmed.match(
+        /^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:\(([^()]*)\)|([A-Za-z_$][\w$]*))\s*=>\s*\{$/
+      );
+      if (arrowDef) {
+        if (/=\s*async\b/.test(trimmed)) {
+          flagBlock('async-arrow-function', trimmed);
+          continue;
+        }
+        const before = ctx.unsupported.length;
+        const params = parseParams(arrowDef[2] ?? arrowDef[3] ?? '', ctx);
+        if (params === null || ctx.unsupported.length > before) {
+          flagBlock('arrow-parameters', trimmed);
+          continue;
+        }
+        declare(arrowDef[1]);
+        scopes.push(new Set(params.map((p) => p.split('=')[0].trim())));
+        emit(`${curPad()}def ${arrowDef[1]}(${params.join(', ')}):`);
+        pushBlock(true);
+        converted.push('arrow-function');
+        continue;
+      }
+      const ifMatch = trimmed.match(/^if\s*\((.*)\)\s*\{$/);
+      if (ifMatch) {
+        emit(`${curPad()}if ${convertExpression(ifMatch[1], ctx)}:`);
+        pushBlock(false);
+        converted.push('if');
+        continue;
+      }
+      const whileMatch = trimmed.match(/^while\s*\((.*)\)\s*\{$/);
+      if (whileMatch) {
+        emit(`${curPad()}while ${convertExpression(whileMatch[1], ctx)}:`);
+        pushBlock(false);
+        converted.push('while');
+        continue;
+      }
+      const forMatch = trimmed.match(/^for\s*\((.*)\)\s*\{$/);
+      if (forMatch) {
+        const head = forMatch[1];
+        const forEach = head.match(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+(of|in)\s+(.+)$/);
+        if (forEach) {
+          declare(forEach[1]);
+          emit(`${curPad()}for ${forEach[1]} in ${convertExpression(forEach[3], ctx)}:`);
+          pushBlock(false);
+          converted.push(forEach[2] === 'of' ? 'for-of' : 'for-in');
+          continue;
+        }
+        const cFor = head.match(
+          /^(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]+);\s*([^;]+);\s*(.+)$/
+        );
+        if (cFor) {
+          const v = cFor[1];
+          const vRe = escapeRegExp(v);
+          const start = convertExpression(cFor[2], ctx);
+          const cond = cFor[3].trim();
+          const upd = cFor[4].trim();
+          const condLt = cond.match(new RegExp(`^${vRe}\\s*(<=?)\\s*(.+)$`));
+          const condGt = cond.match(new RegExp(`^${vRe}\\s*(>=?)\\s*(.+)$`));
+          const updInc = upd.match(new RegExp(`^${vRe}\\s*(?:\\+\\+|\\+=\\s*(.+))$`));
+          const updDec = upd.match(new RegExp(`^${vRe}\\s*(?:--|-=\\s*(.+))$`));
+          const stepRaw = updInc
+            ? updInc[1] !== undefined
+              ? convertExpression(updInc[1], ctx)
+              : '1'
+            : updDec
+              ? updDec[1] !== undefined
+                ? convertExpression(updDec[1], ctx)
+                : '1'
+              : null;
+          const adjust = (stop: string, delta: number) => {
+            if (/^-?\d+$/.test(stop)) return String(parseInt(stop, 10) + delta);
+            return `(${stop} ${delta > 0 ? '+' : '-'} ${Math.abs(delta)})`;
+          };
+          let range: string | null = null;
+          if (condLt && updInc && stepRaw) {
+            const stop = convertExpression(condLt[2], ctx);
+            const stopAdj = condLt[1] === '<=' ? adjust(stop, 1) : stop;
+            range =
+              stepRaw === '1'
+                ? `range(${start}, ${stopAdj})`
+                : `range(${start}, ${stopAdj}, ${stepRaw})`;
+          } else if (condGt && updDec && stepRaw) {
+            const stop = convertExpression(condGt[2], ctx);
+            const stopAdj = condGt[1] === '>=' ? adjust(stop, -1) : stop;
+            range =
+              stepRaw === '1'
+                ? `range(${start}, ${stopAdj}, -1)`
+                : `range(${start}, ${stopAdj}, -${stepRaw})`;
+          }
+          if (range) {
+            declare(v);
+            emit(`${curPad()}for ${v} in ${range}:`);
+            pushBlock(false);
+            converted.push('for-range');
+            continue;
+          }
+        }
+        flagBlock('for-loop', trimmed);
+        continue;
+      }
+      if (/^(class|try|switch|do)\b/.test(trimmed)) {
+        flagBlock(
+          trimmed.startsWith('class')
+            ? 'class'
+            : trimmed.startsWith('try')
+              ? 'try-catch'
+              : trimmed.startsWith('switch')
+                ? 'switch'
+                : 'do-while',
+          trimmed
+        );
+        continue;
+      }
+      flagBlock('block-construct', trimmed);
+      continue;
+    }
+
+    // ---- statements ----
+    const { code: rawCode, comment } = stripLineComment(trimmed);
+    const code = rawCode.replace(/;+$/, '').trim();
+    const commentSuffix = comment ? `  # ${comment}` : '';
+    if (code === '') {
+      out.push(`${curPad()}# ${comment ?? ''}`);
+      continue;
+    }
+
+    // brace-less or inline control-flow forms stay outside the subset
+    if (/^(if|else|for|while|do|switch|try|catch|finally|class|function|async)\b/.test(code)) {
+      flagStatement('brace-less or inline block', code);
+      continue;
+    }
+
+    // module system
+    if (/^(import|export)\b/.test(code) || /\brequire\s*\(/.test(code)) {
+      flagStatement('module-system', code);
+      continue;
+    }
+
+    // declarations: let / const / var
+    const declMatch = code.match(/^(?:const|let|var)\s+([^=;]+?)\s*(?:=\s*([\s\S]+))?$/);
+    if (declMatch) {
+      const target = declMatch[1].trim();
+      if (/^[{[]/.test(target)) {
+        flagStatement('destructuring', code);
+        continue;
+      }
+      const nameMatch = target.match(/^([A-Za-z_$][\w$]*)$/);
+      if (!nameMatch) {
+        flagStatement('declaration', code);
+        continue;
+      }
+      const name = nameMatch[1];
+      declare(name);
+      const rhs = declMatch[2] !== undefined ? declMatch[2].trim() : undefined;
+
+      if (rhs === undefined) {
+        emit(`${curPad()}${name} = None`);
+        converted.push('declaration');
+        continue;
+      }
+
+      const before = ctx.unsupported.length;
+
+      // const f = (a) => expr; / const f = x => expr;
+      const arrow = rhs.match(/^(?:\(([^()]*)\)|([A-Za-z_$][\w$]*))\s*=>\s*([\s\S]+)$/);
+      if (arrow) {
+        if (/^async\b/.test(rhs)) {
+          flagStatement('async-arrow-function', code);
+          continue;
+        }
+        const params = parseParams(arrow[1] ?? arrow[2] ?? '', ctx);
+        if (params === null || ctx.unsupported.length > before) {
+          flagStatement('arrow-parameters', code);
+          continue;
+        }
+        const body = convertExpression(arrow[3], ctx);
+        if (ctx.unsupported.length > before) {
+          flagStatement('arrow-function', code);
+          continue;
+        }
+        scopes.push(new Set(params.map((p) => p.split('=')[0].trim())));
+        emit(`${curPad()}def ${name}(${params.join(', ')}):`);
+        pushBlock(true);
+        emit(`${curPad()}return ${body}`);
+        closeBlock();
+        converted.push('arrow-function');
+        continue;
+      }
+
+      // object literal -> dict
+      if (rhs.startsWith('{')) {
+        const inner = balancedInner(rhs, '{', '}');
+        const dict = inner !== null ? convertObjectLiteral(inner, ctx) : null;
+        if (dict !== null && ctx.unsupported.length === before) {
+          emit(`${curPad()}${name} = ${dict}${commentSuffix}`);
+          continue;
+        }
+        flagStatement('object-literal', code);
+        continue;
+      }
+
+      const value = convertExpression(rhs, ctx);
+      if (ctx.unsupported.length > before) {
+        flagStatement('expression', code);
+        continue;
+      }
+      emit(`${curPad()}${name} = ${value}${commentSuffix}`);
+      converted.push('declaration');
+      continue;
+    }
+
+    // return
+    const retMatch = code.match(/^return\b\s*([\s\S]*)$/);
+    if (retMatch) {
+      const before = ctx.unsupported.length;
+      const val = retMatch[1].trim();
+      if (!val) {
+        emit(`${curPad()}return None`);
+        converted.push('return');
+        continue;
+      }
+      const conv = convertExpression(val, ctx);
+      if (ctx.unsupported.length > before) {
+        flagStatement('return', code);
+        continue;
+      }
+      emit(`${curPad()}return ${conv}${commentSuffix}`);
+      converted.push('return');
+      continue;
+    }
+
+    // break / continue
+    if (code === 'break' || code === 'continue') {
+      emit(`${curPad()}${code}`);
+      continue;
+    }
+
+    // i++ / i--
+    const incMatch = code.match(/^([A-Za-z_$][\w$]*)\s*(\+\+|--)$/);
+    if (incMatch) {
+      if (!mutationAllowed(incMatch[1])) {
+        commentStatement(code);
+        continue;
+      }
+      emit(`${curPad()}${incMatch[1]} ${incMatch[2] === '++' ? '+=' : '-='} 1`);
+      converted.push('increment');
+      continue;
+    }
+
+    // assignments (plain and compound)
+    const assignMatch = code.match(/^([A-Za-z_$][\w$]*)\s*(\+=|-=|\*=|\/=|%=|\*\*=|=)\s*([\s\S]+)$/);
+    if (assignMatch) {
+      if (!mutationAllowed(assignMatch[1])) {
+        commentStatement(code);
+        continue;
+      }
+      const before = ctx.unsupported.length;
+      const rhs = assignMatch[3].trim();
+      let value: string | null;
+      if (rhs.startsWith('{')) {
+        const inner = balancedInner(rhs, '{', '}');
+        value = inner !== null ? convertObjectLiteral(inner, ctx) : null;
+      } else {
+        value = convertExpression(rhs, ctx);
+      }
+      if (value === null || ctx.unsupported.length > before) {
+        flagStatement('assignment', code);
+        continue;
+      }
+      emit(`${curPad()}${assignMatch[1]} ${assignMatch[2]} ${value}${commentSuffix}`);
+      converted.push('assignment');
+      continue;
+    }
+
+    // console.log -> print
+    const logMatch = code.match(/^console\.log\s*\((.*)\)$/);
+    if (logMatch) {
+      const before = ctx.unsupported.length;
+      const args = splitTopLevel(logMatch[1], ',').map((a) => convertExpression(a, ctx));
+      if (ctx.unsupported.length > before) {
+        flagStatement('console.log', code);
+        continue;
+      }
+      emit(`${curPad()}print(${args.join(', ')})${commentSuffix}`);
+      converted.push('console.log');
+      continue;
+    }
+    if (/^console\./.test(code)) {
+      flagStatement('console-other', code);
+      continue;
+    }
+
+    // bare expression statements (calls, etc.)
+    const before = ctx.unsupported.length;
+    const conv = convertExpression(code, ctx);
+    if (ctx.unsupported.length > before) {
+      flagStatement('expression', code);
+      continue;
+    }
+    emit(`${curPad()}${conv}${commentSuffix}`);
+    converted.push('expression-statement');
+  }
+
+  // Close any blocks left open at EOF
+  while (blocks.length > 0) closeBlock();
+
+  // Leak scan: any JS-ism that survived conversion is reported, never
+  // silently emitted as if it were valid Python.
+  for (const emitted of out) {
+    const t = emitted.trim();
+    if (!t || t.startsWith('#')) continue;
+    const m = stripStringsForScan(emitted).match(JS_PY_LEAK);
+    if (m) {
+      unsupported.push(`unconverted js syntax "${m[0]}" in: ${t.slice(0, 60)}`);
+    }
   }
 
   return {

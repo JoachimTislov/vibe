@@ -14,6 +14,7 @@ import type { ToolchainRegistry } from '../toolchains/registry';
 import type { LLMClient } from '../core/universal-transpiler';
 import {
   haskellToJavaScript,
+  jsToPython,
   pythonToJavaScript,
   rustToGo,
   type StructuralTranspileResult,
@@ -42,6 +43,16 @@ const STRUCTURAL_PAIRS: Record<string, (source: string) => StructuralTranspileRe
   'haskell->js': haskellToJavaScript,
   'python->javascript': pythonToJavaScript,
   'python->js': pythonToJavaScript,
+  // JS/TS -> Python: TypeScript input is lowered to JavaScript by the
+  // native TS->JS step (typescript compiler API) before jsToPython runs.
+  'javascript->python': jsToPython,
+  'js->python': jsToPython,
+  'javascript->py': jsToPython,
+  'js->py': jsToPython,
+  'typescript->python': jsToPython,
+  'ts->python': jsToPython,
+  'typescript->py': jsToPython,
+  'ts->py': jsToPython,
 };
 
 export class TranspileMatrix {
@@ -93,7 +104,7 @@ export class TranspileMatrix {
     if (native) return native;
 
     // Tier 2: deterministic structural transpilers
-    const structural = this.tryStructural(source, from, to);
+    const structural = await this.tryStructural(source, from, to);
     if (structural) return structural;
 
     // Tier 3: AI-generated conversion
@@ -139,16 +150,34 @@ export class TranspileMatrix {
   // Tier 2: structural
   // ------------------------------------------------------------------
 
-  private tryStructural(
+  private async tryStructural(
     source: string,
     from: string,
     to: string
-  ): MatrixTranspileResult | null {
+  ): Promise<MatrixTranspileResult | null> {
     const key = `${from}->${to}`.toLowerCase();
     const converter = STRUCTURAL_PAIRS[key];
     if (!converter) return null;
 
-    const report = converter(source);
+    // TypeScript input: lower to JavaScript first with the native TS->JS
+    // step (typescript compiler API), then run the structural converter.
+    let input = source;
+    let lowered = false;
+    if (/^(typescript|ts|tsx)$/.test(from.toLowerCase())) {
+      const fromTc = this.toolchains.forLanguage(from);
+      const js = fromTc?.nativeTranspile
+        ? await fromTc.nativeTranspile(source, from, 'javascript')
+        : null;
+      if (!js) return null;
+      input = js.code;
+      lowered = true;
+    }
+
+    const report = converter(input);
+    if (lowered) {
+      report.converted = ['typescript-types-stripped', ...report.converted];
+    }
+
     return {
       code: report.code,
       from,
