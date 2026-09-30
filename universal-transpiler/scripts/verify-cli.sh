@@ -215,6 +215,50 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 6b. demo recipes: composition into a foodsavr spec + execution
+# ---------------------------------------------------------------------------
+banner "demo recipes (compose -> foodsavr spec -> run)"
+node "$CLI" demo recipes --state "$STATE" > "$TMP/demo-recipes.out" 2> "$TMP/demo-recipes.err"
+grep -q 'recipes demo: 3 recipes, 7 meals' "$TMP/demo-recipes.out" || fail "demo recipes: scenario header missing"
+grep -q 'product=parmesan toBuy=4 usableStock=0 needed=4' "$TMP/demo-recipes.out" \
+  || fail "demo recipes: parmesan not planned from scratch"
+grep -q 'product=Eggs toBuy=8 usableStock=6 needed=14' "$TMP/demo-recipes.out" \
+  || fail "demo recipes: scaled meal quantities wrong"
+grep -q 'product=Bananas quantity=6 daysUntilExpiry=2' "$TMP/demo-recipes.out" \
+  || fail "demo recipes: waste alert missing"
+echo "ok - recipe demo composed into a foodsavr spec and run"
+pass=$((pass + 1))
+
+banner "demo recipes --json (composed spec + workflow result)"
+node "$CLI" demo recipes --json --state "$STATE" > "$TMP/demo-recipes-json.out" 2> "$TMP/demo-recipes-json.err"
+grep -q '"mealPlan"' "$TMP/demo-recipes-json.out" || fail "demo recipes --json: composed spec missing"
+grep -q '"referenceDate": "2026-09-29"' "$TMP/demo-recipes-json.out" || fail "demo recipes --json: reference date missing"
+grep -q '"horizonDays": 7' "$TMP/demo-recipes-json.out" || fail "demo recipes --json: horizon missing"
+grep -q '"toBuy": 4' "$TMP/demo-recipes-json.out" || fail "demo recipes --json: workflow result missing"
+echo "ok - JSON output carries the composed spec and the workflow result"
+pass=$((pass + 1))
+
+banner "demo recipes --target js (generate + execute through the engine)"
+node "$CLI" demo recipes --target js --state "$STATE" > "$TMP/demo-recipes-js.out" 2> "$TMP/demo-recipes-js.err"
+grep -q 'product=parmesan toBuy=4' "$TMP/demo-recipes-js.out" || fail "demo recipes js: reference output missing"
+grep -q '"toBuy": 4' "$TMP/demo-recipes-js.out" || fail "demo recipes js: generated program output missing"
+grep -q 'route: native-run' "$TMP/demo-recipes-js.err" || fail "demo recipes js: route not reported"
+echo "ok - composed spec executed through the engine (js target)"
+pass=$((pass + 1))
+
+banner "demo recipes --target rust (docker fallback)"
+if [ "$DOCKER" = 1 ]; then
+  node "$CLI" demo recipes --target rust --state "$STATE" > "$TMP/demo-recipes-rs.out" 2> "$TMP/demo-recipes-rs.err"
+  grep -q 'product=parmesan to_buy=4 usable_stock=0 needed=4' "$TMP/demo-recipes-rs.out" \
+    || fail "demo recipes rust: composed spec output mismatch"
+  grep -q 'toolchain: docker:rust' "$TMP/demo-recipes-rs.err" || fail "demo recipes rust: not executed via docker"
+  echo "ok - composed spec executed through the rust docker target"
+  pass=$((pass + 1))
+else
+  skipped "demo recipes rust"
+fi
+
+# ---------------------------------------------------------------------------
 # 7. goals --advance with one defined goal
 # ---------------------------------------------------------------------------
 banner "goals --define + --advance"

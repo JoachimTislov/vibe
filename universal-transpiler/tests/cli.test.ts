@@ -378,3 +378,78 @@ describe('CLI demo', () => {
     expect(r.code).not.toBe(0);
   }, 60_000);
 });
+
+describe('CLI demo recipes', () => {
+  it('composes the recipe demo into a foodsavr spec and prints the workflow result', async () => {
+    const r = await cli(['demo', 'recipes', '--state', statePath]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('recipes demo: 3 recipes, 7 meals');
+    // Parmesan is not in the pantry: it must be planned from scratch
+    expect(r.stdout).toContain('product=parmesan toBuy=4 usableStock=0 needed=4');
+    // Scaled meals: 8 eggs planned (14 needed - 6 usable stock)
+    expect(r.stdout).toContain('product=Eggs toBuy=8 usableStock=6 needed=14');
+    // Waste alerts from the composed inventory
+    expect(r.stdout).toContain('product=Bananas quantity=6 daysUntilExpiry=2');
+    expect(r.stdout).toContain('product=Yogurt quantity=2 daysUntilExpiry=4');
+  }, 120_000);
+
+  it('prints the composed spec and the workflow result with --json', async () => {
+    const r = await cli(['demo', 'recipes', '--json', '--state', statePath]);
+    expect(r.code).toBe(0);
+    const payload = JSON.parse(r.stdout);
+
+    // The composed spec: recipes -> meals -> foodsavr spec
+    expect(payload.spec.domain).toBe('food-tracking');
+    expect(payload.spec.referenceDate).toBe('2026-09-29');
+    expect(payload.spec.horizonDays).toBe(7);
+    expect(payload.spec.mealPlan).toHaveLength(7);
+    expect(payload.spec.mealPlan[0].ingredients).toContainEqual({
+      product: 'bananas',
+      quantity: 1,
+    });
+
+    // The reference workflow result
+    const parmesan = payload.result.shoppingList.find(
+      (i: any) => i.product === 'parmesan'
+    );
+    expect(parmesan).toMatchObject({ toBuy: 4, usableStock: 0, needed: 4 });
+    expect(payload.result.wasteAlerts).toHaveLength(4);
+  }, 120_000);
+
+  it('generates and executes the composed spec through the js target', async () => {
+    const r = await cli(['demo', 'recipes', '--target', 'js', '--state', statePath]);
+    expect(r.code).toBe(0);
+    // Reference workflow output (human-readable) ...
+    expect(r.stdout).toContain('product=parmesan toBuy=4');
+    // ... followed by the generated program's output through the engine
+    expect(r.stdout).toContain('"toBuy": 4');
+    expect(r.stderr).toContain('route: native-run');
+  }, 120_000);
+
+  it('generates and executes the composed spec through the rust docker target', async () => {
+    if (!rustAvailable) return console.warn('skipping: rust unavailable (no rustc, no docker)');
+    const r = await cli(['demo', 'recipes', '--target', 'rust', '--state', statePath]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('product=parmesan to_buy=4 usable_stock=0 needed=4');
+    expect(r.stderr).toContain('docker:rust');
+  }, 300_000);
+
+  it('includes the execution report in --json output when --target is given', async () => {
+    const r = await cli(['demo', 'recipes', '--json', '--target', 'js', '--state', statePath]);
+    expect(r.code).toBe(0);
+    const payload = JSON.parse(r.stdout);
+    expect(payload.spec.mealPlan).toHaveLength(7);
+    expect(payload.result.shoppingList).toHaveLength(7);
+    expect(payload.execution).toMatchObject({
+      target: 'javascript',
+      route: 'native-run',
+      ok: true,
+    });
+  }, 120_000);
+
+  it('rejects unknown recipe demo targets', async () => {
+    const r = await cli(['demo', 'recipes', '--target', 'cobol', '--state', statePath]);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain('unknown demo target');
+  }, 60_000);
+});
