@@ -1,0 +1,6 @@
+[submodule "terseus"]
+	path = terseus
+	url = https://github.com/JoachimTislov/terseus.git
+[submodule "refViz"]
+	path = refViz
+	url = https://github.com/JoachimTislov/RefViz.git
