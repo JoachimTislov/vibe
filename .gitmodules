@@ -4,3 +4,7 @@
 [submodule "refViz"]
 	path = refViz
 	url = https://github.com/JoachimTislov/RefViz.git
+[submodule "php-api-server"]
+	path = php-api-server
+	url = https://github.com/JoachimTislov/php-api-server.git
+	branch = vibe
