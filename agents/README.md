@@ -41,6 +41,12 @@ explicit user confirmation on every invocation via the ADK
 human-in-the-loop flow. Google Search grounding is added on top of the
 custom tools.
 
+## Deployment
+
+`agents api` serves the ADK REST API in production mode (no dev console);
+`agents a2a` serves the Agent2Agent protocol. See [DEPLOY.md](DEPLOY.md)
+for the Docker image, VPS/Cloudflare options and the security checklist.
+
 ## Tests
 
 ```sh

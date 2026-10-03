@@ -49,6 +49,21 @@ func NewShellTool(w Workspace) ([]tool.Tool, error) {
 	return []tool.Tool{runCommand}, nil
 }
 
+// shellSpec is the shell used by run_command. bash when available (login
+// shell), otherwise /bin/sh. Keeps the tool working in minimal containers
+// like Alpine.
+type shellSpec struct {
+	path      string
+	extraArgs []string
+}
+
+var shellCommand = func() shellSpec {
+	if p, err := exec.LookPath("bash"); err == nil {
+		return shellSpec{path: p, extraArgs: []string{"-l"}}
+	}
+	return shellSpec{path: "/bin/sh"}
+}()
+
 // RunShellIn is the core of run_command, callable outside the LLM loop.
 func RunShellIn(w Workspace, command string) (RunCommandResult, error) {
 	if strings.TrimSpace(command) == "" {
@@ -56,7 +71,7 @@ func RunShellIn(w Workspace, command string) (RunCommandResult, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), shellTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
+	cmd := exec.CommandContext(ctx, shellCommand.path, append(append([]string{}, shellCommand.extraArgs...), "-c", command)...)
 	cmd.Dir = w.Root
 	var out bytes.Buffer
 	cmd.Stdout = &out

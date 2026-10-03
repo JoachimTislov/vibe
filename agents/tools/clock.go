@@ -6,6 +6,10 @@ import (
 	"strings"
 	"time"
 
+	// Embed the timezone database so get_time works in minimal
+	// containers (e.g. distroless/alpine) without /usr/share/zoneinfo.
+	_ "time/tzdata"
+
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
