@@ -1,18 +1,44 @@
 # VPS deployment for the personal agent.
 #
-#   GOOGLE_API_KEY=... docker compose up -d
+#   Put your provider key in .env, then: docker compose up -d --build
 #
-# The API binds to 127.0.0.1 only: reach it through a reverse proxy
-# (Caddy/nginx) or a Cloudflare Tunnel, never expose 8080 directly.
+# Both services bind to 127.0.0.1 only: reach them through a reverse
+# proxy (Caddy/nginx), Cloudflare Tunnel or Tailscale. See agents/docs/.
 services:
   agent:
     build: ..
     image: personal-agent
     restart: unless-stopped
-    environment:
-      MISTRAL_API_KEY: ${MISTRAL_API_KEY:?set MISTRAL_API_KEY}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-flash-latest}
+    environment: &agent-env
+      AGENT_MODEL_PROVIDER: ${AGENT_MODEL_PROVIDER:-mistral}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      MISTRAL_MODEL: ${MISTRAL_MODEL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
+      AGENT_CLI_COMMAND: ${AGENT_CLI_COMMAND:-}
+      AGENT_BASE_URL: ${AGENT_BASE_URL:-}
+      AGENT_MODEL: ${AGENT_MODEL:-}
+      AGENT_API_KEY: ${AGENT_API_KEY:-}
     ports:
       - "127.0.0.1:8080:8080"
+    volumes:
+      - ./workspace:/workspace
+
+  agent-mcp:
+    image: personal-agent
+    restart: unless-stopped
+    depends_on:
+      - agent
+    command: ["mcp"]
+    environment: *agent-env
+    ports:
+      - "127.0.0.1:8081:8080"
     volumes:
       - ./workspace:/workspace

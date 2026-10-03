@@ -1,12 +1,14 @@
-// Package mistralmodel implements the ADK model.LLM interface against
-// Mistral's OpenAI-compatible chat completions API
-// (https://api.mistral.ai/v1/chat/completions).
+// Package openaicomp implements the ADK model.LLM interface against any
+// OpenAI-compatible chat completions API: Mistral, OpenAI, OpenRouter,
+// Groq, Ollama, LM Studio, llama.cpp and anything else speaking the
+// /chat/completions wire format.
 //
-// ADK's own openaimodel targets the OpenAI Responses API, which Mistral
-// does not serve, so this adapter translates the generic
-// model.LLMRequest (genai contents, config and function declarations)
-// into chat completions and the reply back into a model.LLMResponse.
-package mistralmodel
+// ADK's own openaimodel targets the OpenAI Responses API, which most
+// compatible endpoints do not serve, so this adapter translates the
+// generic model.LLMRequest (genai contents, config and function
+// declarations) into chat completions and the reply back into a
+// model.LLMResponse.
+package openaicomp
 
 import (
 	"bytes"
@@ -24,45 +26,56 @@ import (
 	"google.golang.org/genai"
 )
 
-const defaultBaseURL = "https://api.mistral.ai/v1"
-
-// Model is a Mistral chat model behind the ADK model.LLM interface.
-type Model struct {
-	name    string
-	apiKey  string
-	baseURL string
-	client  *http.Client
+// Config configures an OpenAI-compatible chat model.
+type Config struct {
+	// Model is the provider-specific model name, e.g. mistral-large-latest.
+	Model string
+	// APIKey is sent as a bearer token. Leave empty for keyless local
+	// endpoints such as Ollama.
+	APIKey string
+	// BaseURL is the API root without a trailing slash, e.g.
+	// https://api.mistral.ai/v1.
+	BaseURL string
+	// HTTPClient is optional; defaults to a client with a 2-minute timeout.
+	HTTPClient *http.Client
 }
 
-// New returns a Model serving modelName via the Mistral API.
-func New(modelName, apiKey string) *Model {
-	return &Model{
-		name:    modelName,
-		apiKey:  apiKey,
-		baseURL: defaultBaseURL,
-		client:  &http.Client{Timeout: 120 * time.Second},
+// Model is an OpenAI-compatible chat model behind the ADK model.LLM
+// interface.
+type Model struct {
+	cfg    Config
+	client *http.Client
+}
+
+// New returns a Model for the given configuration.
+func New(cfg Config) *Model {
+	m := &Model{cfg: cfg}
+	m.client = cfg.HTTPClient
+	if m.client == nil {
+		m.client = &http.Client{Timeout: 120 * time.Second}
 	}
+	return m
 }
 
 // Name implements model.LLM.
-func (m *Model) Name() string { return m.name }
+func (m *Model) Name() string { return m.cfg.Model }
 
 // GenerateContent implements model.LLM. Streaming is not segmented: the
 // full response is yielded as a single final event.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if req == nil {
-			yield(nil, errors.New("mistral: nil request"))
+			yield(nil, errors.New("openaicomp: nil request"))
 			return
 		}
-		payload, err := buildChatRequest(m.name, req)
+		payload, err := buildChatRequest(m.cfg.Model, req)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 		resp, err := m.call(ctx, payload)
 		if err != nil {
-			yield(nil, fmt.Errorf("mistral: call failed: %w", err))
+			yield(nil, fmt.Errorf("openaicomp %s: call failed: %w", m.cfg.Model, err))
 			return
 		}
 		llmResp, err := convertResponse(resp)
@@ -77,11 +90,13 @@ func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stre
 // call posts the chat request and decodes the chat response.
 func (m *Model) call(ctx context.Context, payload []byte) (*chatResponse, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimSuffix(m.baseURL, "/")+"/chat/completions", bytes.NewReader(payload))
+		strings.TrimSuffix(m.cfg.BaseURL, "/")+"/chat/completions", bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+m.apiKey)
+	if m.cfg.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+m.cfg.APIKey)
+	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
 
@@ -289,7 +304,7 @@ func buildChatRequest(modelName string, req *model.LLMRequest) ([]byte, error) {
 	}
 
 	if len(cr.Messages) == 0 {
-		return nil, errors.New("mistral: no content in request")
+		return nil, errors.New("openaicomp: no content in request")
 	}
 	return json.Marshal(cr)
 }
@@ -309,7 +324,7 @@ func contentText(c *genai.Content) string {
 // convertResponse maps a chat completions response to a model.LLMResponse.
 func convertResponse(resp *chatResponse) (*model.LLMResponse, error) {
 	if len(resp.Choices) == 0 {
-		return nil, errors.New("mistral: response has no choices")
+		return nil, errors.New("openaicomp: response has no choices")
 	}
 	choice := resp.Choices[0]
 	content := &genai.Content{Role: string(genai.RoleModel)}

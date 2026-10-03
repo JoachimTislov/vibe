@@ -1,4 +1,4 @@
-package mistralmodel
+package openaicomp
 
 import (
 	"encoding/json"
