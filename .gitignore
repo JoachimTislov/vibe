@@ -7,3 +7,9 @@ coverage/
 *.log
 .universal-transpiler/
 .universal-transpiler-cache/
+
+# Secrets and credentials - never commit env files
+.env
+.env.*
+!.env.example
+!.env.*.example
