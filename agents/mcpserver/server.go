@@ -2,17 +2,14 @@
 // Protocol, so AI CLIs such as Claude Code, Codex, Gemini CLI and Mistral
 // CLIs can use it as a remote tool server.
 //
-// Two kinds of tools are served:
-//
-//   - The read-only workspace tools directly (get_time, read_file,
-//     list_dir, git_summary), with schemas inferred from Go types.
-//   - ask_agent: the full LLM agent as a single tool. The confirmation-
-//     gated run_command tool is excluded from the served agent; over MCP
-//     there is no human to approve it.
+// Access is owner-only: every request must carry the bearer token
+// configured as AGENT_ACCESS_KEY (or access_key in agent.json). Direct
+// tool calls are recorded in the action journal.
 package mcpserver
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"log"
 	"net"
@@ -33,31 +30,44 @@ import (
 const (
 	appName = "personal_agent"
 	mcpUser = "mcp-client"
-	version = "0.1.0"
+	version = "0.2.0"
 )
 
 // Options configure the MCP server.
 type Options struct {
-	// PersonalAgent is the LLM agent served by ask_agent. It must not
-	// contain confirmation-gated tools.
+	// PersonalAgent is the LLM agent served by ask_agent.
 	PersonalAgent agent.Agent
 	Workspace     tools.Workspace
+	// Journal records direct MCP tool calls; may be nil.
+	Journal *tools.Journal
+	// AccessKey is the owner's bearer token. Required; the server
+	// refuses unauthenticated access.
+	AccessKey string
 }
 
-// New builds the streamable-HTTP MCP handler.
+// New builds the authenticated streamable-HTTP MCP handler.
 func New(opts Options) (http.Handler, error) {
 	if opts.PersonalAgent == nil {
 		return nil, fmt.Errorf("mcpserver: personal agent is required")
+	}
+	if opts.AccessKey == "" {
+		return nil, fmt.Errorf("mcpserver: access key is required (owner-only access)")
 	}
 	run, err := runner.NewInMemory(appName, opts.PersonalAgent)
 	if err != nil {
 		return nil, fmt.Errorf("mcpserver: runner: %w", err)
 	}
 	ws := opts.Workspace
+	journal := opts.Journal
+
+	// record wraps a tool call for the action journal.
+	record := func(tool string, in, out any, err error) {
+		journal.Record("mcp", tool, in, out, err)
+	}
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "personal-agent", Version: version}, nil)
 
-	// --- direct read-only workspace tools -----------------------------
+	// --- direct workspace tools --------------------------------------
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_time",
@@ -66,6 +76,7 @@ func New(opts Options) (http.Handler, error) {
 		City string `json:"city"`
 	}) (*mcp.CallToolResult, any, error) {
 		res, err := tools.TimeIn(in.City)
+		record("get_time", in, res, err)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -79,6 +90,7 @@ func New(opts Options) (http.Handler, error) {
 		Path string `json:"path"`
 	}) (*mcp.CallToolResult, any, error) {
 		res, err := tools.ReadFileIn(ws, in.Path)
+		record("read_file", in, res, err)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -92,6 +104,7 @@ func New(opts Options) (http.Handler, error) {
 		Path string `json:"path"`
 	}) (*mcp.CallToolResult, any, error) {
 		res, err := tools.ListDirIn(ws, in.Path)
+		record("list_dir", in, res, err)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -105,6 +118,22 @@ func New(opts Options) (http.Handler, error) {
 		Repo string `json:"repo"`
 	}) (*mcp.CallToolResult, any, error) {
 		res, err := tools.GitSummaryIn(ws, in.Repo)
+		record("git_summary", in, res, err)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &mcp.CallToolResult{}, res, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "web_fetch",
+		Description: "Fetches an http(s) page and returns title, text and links; an optional CSS selector extracts specific elements. For scraping sites without an API.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct {
+		URL      string `json:"url"`
+		Selector string `json:"selector,omitempty"`
+	}) (*mcp.CallToolResult, any, error) {
+		res, err := tools.WebFetchIn(nil, in.URL, in.Selector)
+		record("web_fetch", in, res, err)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -115,7 +144,7 @@ func New(opts Options) (http.Handler, error) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "ask_agent",
-		Description: "Ask Joachim's personal agent (LLM with get_time/read_file/list_dir/git_summary tools) a question. Pass session_id to continue a conversation.",
+		Description: "Ask Joachim's personal agent (LLM with the full toolset) to do something. Pass session_id to continue a conversation.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in struct {
 		Prompt    string `json:"prompt"`
 		SessionID string `json:"session_id,omitempty"`
@@ -128,16 +157,34 @@ func New(opts Options) (http.Handler, error) {
 			sessionID = uuid.NewString()
 		}
 		reply, err := runAgent(ctx, run, sessionID, in.Prompt)
+		out := struct {
+			Reply     string `json:"reply"`
+			SessionID string `json:"session_id"`
+		}{Reply: reply, SessionID: sessionID}
+		record("ask_agent", in, out, err)
 		if err != nil {
 			return nil, nil, err
 		}
-		return &mcp.CallToolResult{}, struct {
-			Reply     string `json:"reply"`
-			SessionID string `json:"session_id"`
-		}{Reply: reply, SessionID: sessionID}, nil
+		return &mcp.CallToolResult{}, out, nil
 	})
 
-	return mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server { return srv }, nil), nil
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server { return srv }, nil)
+	return authMiddleware(opts.AccessKey, mcpHandler), nil
+}
+
+// authMiddleware enforces owner-only access: a constant-time bearer
+// token comparison on every request.
+func authMiddleware(accessKey string, next http.Handler) http.Handler {
+	want := []byte("Bearer " + accessKey)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := []byte(r.Header.Get("Authorization"))
+		if subtle.ConstantTimeCompare(got, want) != 1 {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, `{"error":"unauthorized: valid owner API key required"}`, http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // runAgent runs one turn and returns the final assistant text.
@@ -171,7 +218,6 @@ func runAgent(ctx context.Context, run *runner.Runner, sessionID, prompt string)
 }
 
 // Serve starts the MCP streamable HTTP server on the given address.
-// It blocks until the listener fails or the context is done.
 func Serve(ctx context.Context, handler http.Handler, addr string) error {
 	mux := http.NewServeMux()
 	// Clients configure either the root or /mcp; both work.
@@ -182,7 +228,7 @@ func Serve(ctx context.Context, handler http.Handler, addr string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("MCP server listening on %s (endpoint: http://%s/mcp)", addr, addr)
+	log.Printf("MCP server listening on %s (endpoint: http://%s/mcp, owner-key required)", addr, addr)
 	srv := &http.Server{Handler: mux, BaseContext: func(net.Listener) context.Context { return ctx }}
 	var wg sync.WaitGroup
 	wg.Add(1)

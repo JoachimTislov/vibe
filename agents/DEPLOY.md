@@ -68,8 +68,12 @@ persistent workspace.
 
 ## Security checklist
 
-- The ADK REST API has **no built-in authentication**. Do not expose it
-  publicly. Use Cloudflare Access, Caddy `basic_auth`, or an mTLS proxy.
+- The MCP endpoint is owner-only by design: it refuses to start without
+  `AGENT_ACCESS_KEY` and rejects requests without the bearer token.
+  Keep the key in `.env`/secrets only.
+- The ADK REST API (`api`/`a2a` modes) has **no built-in authentication**.
+  Do not expose it publicly. Use Cloudflare Access, Caddy `basic_auth`,
+  or an mTLS proxy - or just serve the MCP endpoint instead.
 - `MISTRAL_API_KEY` (or `GOOGLE_API_KEY` for the gemini provider) enters
   only as an environment secret.
 - All file/git/shell tools are confined to `$AGENT_WORKSPACE` (default

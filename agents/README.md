@@ -35,6 +35,53 @@ has its own Messages API adapter; `cli` delegates whole turns to an
 installed AI CLI (text in on stdin, answer on stdout; no function
 calling in that mode).
 
+## Configuration file (agent.json)
+
+Optional; looked up at $AGENT_CONFIG or <workspace>/agent.json.
+Environment variables override it.
+
+```json
+{
+  "model": {"provider": "mistral", "model": "mistral-large-latest"},
+  "access_key": "owner-only bearer token for the MCP endpoint",
+  "mcp_allow_privileged": false,
+  "mcp_servers": [
+    {"name": "fetch", "command": ["npx", "-y", "@modelcontextprotocol/server-fetch"]},
+    {"name": "todo", "url": "https://mcp.example.com", "bearer": "..."}
+  ]
+}
+```
+
+`mcp_servers` are MCP connections the agent makes as a client: their
+tools appear next to the built-in ones, so the agent can act on your
+behalf in other systems. `mcp_allow_privileged` auto-approves gated
+tools over MCP (the endpoint is owner-key-only; off by default).
+
+## Self-recording
+
+Every tool call is journaled to `<workspace>/logs/journal/YYYY-MM-DD.jsonl`
+(agent loop via ADK callbacks, direct MCP calls, and a startup
+self-check). The agent reads its own journal with `journal_query` and
+reports its health with `self_report` - provider, model, uptime, action
+and error counts, running processes.
+
+## Owner-only access
+
+The MCP endpoint refuses to start without an access key
+(AGENT_ACCESS_KEY or agent.json access_key) and answers 401 to every
+request without a valid `Authorization: Bearer <key>` (constant-time
+compare). Point clients at it with the header:
+
+```sh
+claude mcp add --transport http --header "Authorization: Bearer $AGENT_ACCESS_KEY" \
+  personal-agent https://agent.example.com/mcp
+```
+
+## Recipes
+
+- [docs/recipes/grocery-offers.md](docs/recipes/grocery-offers.md) -
+  scraping sites without integration support, robots and scripts.
+
 ## Using the agent from AI CLIs
 
 `agents mcp` serves MCP (streamable HTTP, endpoint `/mcp`): the
@@ -59,11 +106,20 @@ see the setup guides in `docs/`.
 main.go        harness: model + agent + ADK launcher
 persona.go     the personal agent's system instruction
 tools/         custom toolset (workspace-rooted)
-  clock.go     get_time      real local time for a city or IANA zone
-  files.go     read_file     read a workspace file (64KB cap)
-               list_dir      list a workspace directory
-  git.go       git_summary   branch, dirty state and recent log
-  shell.go     run_command   shell in the workspace root, HITL-gated
+  clock.go     get_time        real local time for a city or IANA zone
+  files.go     read_file       read a workspace file (64KB cap)
+               list_dir        list a workspace directory
+  git.go       git_summary     branch, dirty state and recent log
+  shell.go     run_command     shell in the workspace root, gated
+  fileops.go   write_file      write/create files (256KB cap), gated
+               delete_path     delete files/dirs, gated
+  processes.go list_processes  agent-started + filtered system processes
+               start_process   detached background process, gated
+               stop_process    stop by name (TERM then KILL), gated
+  web.go       web_fetch       fetch page, extract text/links/selector
+  journal.go   action journal (JSONL under logs/journal/)
+  self.go      self_report     own health: provider, uptime, stats
+               journal_query   audit own actions and errors
   workspace.go path resolution and escape protection
 openaicomp/     ADK model.LLM adapter for any OpenAI-compatible endpoint
 anthropicmodel/  ADK model.LLM adapter for the Anthropic Messages API

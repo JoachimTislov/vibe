@@ -32,12 +32,12 @@ type RunCommandResult struct {
 // NewShellTool returns run_command: an arbitrary shell command run in the
 // workspace root. Every invocation requires explicit user confirmation,
 // enforced by the ADK human-in-the-loop flow.
-func NewShellTool(w Workspace) ([]tool.Tool, error) {
+func NewShellTool(w Workspace, opts Options) ([]tool.Tool, error) {
 	runCommand, err := functiontool.New(
 		functiontool.Config{
 			Name:                "run_command",
 			Description:         "Runs a shell command in the workspace root and returns its combined output and exit code. Requires user confirmation before execution.",
-			RequireConfirmation: true,
+			RequireConfirmation: !opts.AutoApprove,
 		},
 		func(ctx agent.Context, args RunCommandArgs) (RunCommandResult, error) {
 			return RunShellIn(w, args.Command)

@@ -11,6 +11,7 @@ services:
     restart: unless-stopped
     environment: &agent-env
       AGENT_MODEL_PROVIDER: ${AGENT_MODEL_PROVIDER:-mistral}
+      AGENT_ACCESS_KEY: ${AGENT_ACCESS_KEY:-}
       MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
       MISTRAL_MODEL: ${MISTRAL_MODEL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

@@ -21,6 +21,7 @@ cd vibe/agents/deploy
 cat > .env <<EOF
 AGENT_MODEL_PROVIDER=mistral
 MISTRAL_API_KEY=your-key
+AGENT_ACCESS_KEY=generate-a-long-random-token
 # other providers:
 # AGENT_MODEL_PROVIDER=openai      OPENAI_API_KEY=...
 # AGENT_MODEL_PROVIDER=openrouter  OPENROUTER_API_KEY=...
@@ -77,7 +78,8 @@ sudo systemctl reload caddy
 
 ```sh
 # Claude Code
-claude mcp add --transport http personal-agent https://agent.example.com/mcp
+claude mcp add --transport http --header "Authorization: Bearer $AGENT_ACCESS_KEY" \
+  personal-agent https://agent.example.com/mcp
 
 # Codex (~/.codex/config.toml)
 [mcp_servers.personal-agent]
