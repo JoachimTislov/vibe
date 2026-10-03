@@ -1,18 +1,24 @@
-// Command agents runs Joachim's personal agent: a Gemini-backed ADK agent
-// with a custom toolset rooted in the projects workspace.
+// Command agents runs Joachim's personal agent: an ADK agent with a
+// custom toolset rooted in the projects workspace.
 //
 // Environment:
 //
-//	GOOGLE_API_KEY     required; Gemini API key
-//	GEMINI_MODEL       optional; defaults to gemini-flash-latest
-//	AGENT_WORKSPACE    optional; workspace root, defaults to $HOME/projects
+//	AGENT_MODEL_PROVIDER  optional; "mistral" (default) or "gemini"
+//	MISTRAL_API_KEY       required for the mistral provider
+//	MISTRAL_MODEL         optional; defaults to mistral-large-latest
+//	GOOGLE_API_KEY        required for the gemini provider
+//	GEMINI_MODEL          optional; defaults to gemini-flash-latest
+//	AGENT_WORKSPACE       optional; workspace root, defaults to $HOME/projects
 package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
+	"strings"
 
+	"agents/mistralmodel"
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/cmd/launcher"
@@ -27,19 +33,20 @@ import (
 	"agents/tools"
 )
 
+const (
+	providerMistral = "mistral"
+	providerGemini  = "gemini"
+)
+
 func main() {
 	ctx := context.Background()
 
-	if os.Getenv("GOOGLE_API_KEY") == "" {
-		log.Fatal("GOOGLE_API_KEY is not set")
-	}
-
-	model, err := newModel(ctx)
+	llm, provider, err := newModel(ctx)
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
 	}
 
-	personal, err := newPersonalAgent(model)
+	personal, err := newPersonalAgent(llm, provider == providerGemini)
 	if err != nil {
 		log.Fatalf("Failed to create agent: %v", err)
 	}
@@ -60,20 +67,48 @@ func main() {
 	}
 }
 
-// newModel builds the Gemini model from the environment.
-func newModel(ctx context.Context) (model.LLM, error) {
-	name := os.Getenv("GEMINI_MODEL")
-	if name == "" {
-		name = "gemini-flash-latest"
+// newModel builds the LLM from the environment. Mistral is the default
+// provider, served by the custom mistralmodel adapter (Mistral speaks
+// chat completions, not OpenAI's Responses API); gemini uses the native
+// genai model.
+func newModel(ctx context.Context) (model.LLM, string, error) {
+	provider := strings.ToLower(os.Getenv("AGENT_MODEL_PROVIDER"))
+	if provider == "" {
+		provider = providerMistral
 	}
-	return gemini.NewModel(ctx, name, &genai.ClientConfig{
-		APIKey: os.Getenv("GOOGLE_API_KEY"),
-	})
+	switch provider {
+	case providerMistral:
+		key := os.Getenv("MISTRAL_API_KEY")
+		if key == "" {
+			return nil, "", fmt.Errorf("MISTRAL_API_KEY is not set")
+		}
+		name := os.Getenv("MISTRAL_MODEL")
+		if name == "" {
+			name = "mistral-large-latest"
+		}
+		return mistralmodel.New(name, key), provider, nil
+	case providerGemini:
+		key := os.Getenv("GOOGLE_API_KEY")
+		if key == "" {
+			return nil, "", fmt.Errorf("GOOGLE_API_KEY is not set")
+		}
+		name := os.Getenv("GEMINI_MODEL")
+		if name == "" {
+			name = "gemini-flash-latest"
+		}
+		llm, err := gemini.NewModel(ctx, name, &genai.ClientConfig{
+			APIKey: key,
+		})
+		return llm, provider, err
+	default:
+		return nil, "", fmt.Errorf("unknown AGENT_MODEL_PROVIDER %q: use mistral or gemini", provider)
+	}
 }
 
 // newPersonalAgent assembles the personal agent: generalized harness
 // (model + toolset + launcher) with a personal persona layered on top.
-func newPersonalAgent(llm model.LLM) (agent.Agent, error) {
+// Web search grounding (Google Search) is only available on Gemini.
+func newPersonalAgent(llm model.LLM, withSearch bool) (agent.Agent, error) {
 	workspace, err := tools.DefaultWorkspace()
 	if err != nil {
 		return nil, err
@@ -82,13 +117,15 @@ func newPersonalAgent(llm model.LLM) (agent.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Google Search grounding on top of the custom toolset.
-	all := append(custom, tool.Tool(geminitool.GoogleSearch{}))
+	all := custom
+	if withSearch {
+		all = append(all, tool.Tool(geminitool.GoogleSearch{}))
+	}
 	return llmagent.New(llmagent.Config{
 		Name:        "personal_agent",
 		Model:       llm,
 		Description: "Joachim's personal agent with custom tools for his projects workspace.",
-		Instruction: persona(workspace.Root),
+		Instruction: persona(workspace.Root, withSearch),
 		Tools:       all,
 	})
 }

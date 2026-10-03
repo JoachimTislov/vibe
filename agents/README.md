@@ -8,17 +8,19 @@ capability the agent has is a typed Go function wrapped as an ADK tool.
 ## Run
 
 ```sh
-export GOOGLE_API_KEY=...      # required
+export MISTRAL_API_KEY=...     # required (default provider)
 go run .                       # interactive console
-GEMINI_MODEL=gemini-pro-latest go run .   # optional model override
+AGENT_MODEL_PROVIDER=gemini GOOGLE_API_KEY=... go run .   # Gemini instead
 ```
 
 ## Configuration
 
 | Env var           | Default               | Purpose                          |
 |-------------------|-----------------------|----------------------------------|
-| `GOOGLE_API_KEY`  | -                     | Gemini API key                   |
-| `GEMINI_MODEL`    | `gemini-flash-latest` | Model for the agent              |
+| `MISTRAL_API_KEY`  | -                     | Mistral API key (default provider) |
+| `MISTRAL_MODEL`    | `mistral-large-latest`| Model for the mistral provider    |
+| `GOOGLE_API_KEY`   | -                     | Gemini API key (gemini provider)  |
+| `AGENT_MODEL_PROVIDER` | `mistral`         | Provider: mistral or gemini       |
 | `AGENT_WORKSPACE` | `$HOME/projects`      | Root for all workspace tools     |
 
 ## Structure
@@ -33,6 +35,7 @@ tools/         custom toolset (workspace-rooted)
   git.go       git_summary   branch, dirty state and recent log
   shell.go     run_command   shell in the workspace root, HITL-gated
   workspace.go path resolution and escape protection
+mistralmodel/  ADK model.LLM adapter for Mistral chat completions
 ```
 
 All tools resolve paths against the workspace root and reject anything

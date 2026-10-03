@@ -64,7 +64,8 @@ persistent workspace.
 
 - The ADK REST API has **no built-in authentication**. Do not expose it
   publicly. Use Cloudflare Access, Caddy `basic_auth`, or an mTLS proxy.
-- `GOOGLE_API_KEY` enters only as an environment secret.
+- `MISTRAL_API_KEY` (or `GOOGLE_API_KEY` for the gemini provider) enters
+  only as an environment secret.
 - All file/git/shell tools are confined to `$AGENT_WORKSPACE` (default
   `/workspace` in the container) with symlink escape protection.
 - `run_command` still requires human-in-the-loop confirmation; over the

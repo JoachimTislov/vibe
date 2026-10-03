@@ -10,7 +10,7 @@ services:
     image: personal-agent
     restart: unless-stopped
     environment:
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:?set GOOGLE_API_KEY}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:?set MISTRAL_API_KEY}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-flash-latest}
     ports:
       - "127.0.0.1:8080:8080"

@@ -4,8 +4,8 @@ import "fmt"
 
 // persona returns the system instruction of the personal agent. It is the
 // single place that defines who the agent is for and how it should behave.
-func persona(workspaceRoot string) string {
-	return fmt.Sprintf(`You are Joachim's personal agent. You help him with
+func persona(workspaceRoot string, withSearch bool) string {
+	instruction := fmt.Sprintf(`You are Joachim's personal agent. You help him with
 his software projects, his schedule, and quick research questions.
 
 Your workspace is rooted at %s. All file, git and shell tools operate
@@ -23,7 +23,10 @@ How you work:
   always asks Joachim for confirmation first. Keep commands small and
   read-only unless he asks for changes.
 - Be concise and technical. Answer in the language Joachim uses.
-- For anything outside the workspace (web lookups), use Google Search.
 - Time zone for "here": Europe/Oslo.
 `, workspaceRoot)
+	if withSearch {
+		instruction += "- For anything outside the workspace (web lookups), use Google Search.\n"
+	}
+	return instruction
 }
