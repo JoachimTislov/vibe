@@ -1,4 +1,4 @@
-# Setup: Tailscale (tailnet or public internet)
+# Setup: Tailscale / Headscale (tailnet or public internet)
 
 Expose the agent from any machine - VPS, homelab, Raspberry Pi - through
 Tailscale, with zero open inbound ports. Two levels:
@@ -10,6 +10,10 @@ Tailscale, with zero open inbound ports. Two levels:
 
 The agent keeps running in an isolated container process; Tailscale only
 forwards traffic to `localhost`.
+
+This guide works with the official Tailscale control server and, with
+the differences described at the bottom, with **Headscale**, the
+self-hosted control server.
 
 ## 1. Install and start the agent
 
@@ -88,3 +92,57 @@ curl -s https://agentbox.tailnet-name.ts.net/mcp -X POST \
 ```
 
 A JSON-RPC result means the agent is reachable through Tailscale.
+
+## 5. Headscale instead of the Tailscale control server
+
+[Headscale](https://headscale.net) is the self-hosted, open-source
+control server; the same `tailscale` client joins it. Setting it up:
+
+```sh
+# On the control server (docs: headscale.net/stable):
+#   install headscale, configure dns.magic_dns + base_domain, start it
+headscale users create joachim
+headscale preauthkeys create --user joachim --expiration 1h
+
+# On the agent host and on each of your client devices:
+sudo tailscale up --login-server https://headscale.example.com --authkey <key>
+```
+
+What changes for this guide:
+
+| Feature | Official Tailscale | Headscale |
+|---|---|---|
+| Direct tailnet access (WireGuard) | Works | Works |
+| `tailscale serve` with HTTPS | Works, auto-certificates | Feature gap: the node HTTPS certificate flow is not implemented (headscale issue #1921) |
+| `tailscale funnel` (public internet) | Works | Not available - it depends on Tailscale's cloud/Cloudflare integration |
+
+Practical consequences:
+
+- **Tailnet-only: fully works, and it is simpler than `serve`.** Your
+  devices reach the container directly at its tailnet address:
+
+  ```sh
+  claude mcp add --transport http personal-agent http://agentbox:8081/mcp
+  # or by tailnet IP: http://100.x.y.z:8081/mcp
+  ```
+
+  The traffic is WireGuard-encrypted end to end; the plain HTTP rides
+  inside it. For TLS inside the tailnet, run Caddy on the host with any
+  certificate you like and point it at `127.0.0.1:8081`.
+
+- **Public internet: use a normal reverse proxy instead of funnel.**
+  Point a domain at the host, open 443, and let Caddy terminate TLS:
+
+  ```
+  agent.example.com {
+      reverse_proxy 127.0.0.1:8081
+  }
+  ```
+
+  Or skip open ports entirely with the Cloudflare Tunnel path from
+  [setup-cloudflare.md](setup-cloudflare.md) - it is control-server
+  agnostic and works behind Headscale.
+
+Headscale keeps the isolation story unchanged: the agent process stays in
+its container; only the coordination of your devices moves to your own
+server.

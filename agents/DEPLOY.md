@@ -13,7 +13,7 @@ Both listen on plain HTTP — TLS and auth belong to the layer in front.
 ## Setup guides
 
 - [docs/setup-vps.md](docs/setup-vps.md) - any VPS, Docker Compose
-- [docs/setup-tailscale.md](docs/setup-tailscale.md) - tailnet or public internet, zero open ports
+- [docs/setup-tailscale.md](docs/setup-tailscale.md) - tailnet or public internet, zero open ports; Headscale section incl.
 - [docs/setup-cloudflare.md](docs/setup-cloudflare.md) - Cloudflare Tunnel or Containers
 
 ## Where to run it
