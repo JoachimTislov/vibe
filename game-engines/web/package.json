@@ -1,0 +1,19 @@
+{
+  "name": "game-engines-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Common Svelte web interface to play the game-engines rules engines against an AI or a bot",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "smoke": "node ../scripts/web-smoke.ts"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.4",
+    "svelte": "^5.57.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.2"
+  }
+}

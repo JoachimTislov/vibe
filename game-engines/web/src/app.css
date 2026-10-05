@@ -1,0 +1,223 @@
+:root {
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  color-scheme: light;
+  --ink: #1c2430;
+  --muted: #64707d;
+  --line: #d4dae0;
+  --accent: #2b6cb0;
+}
+
+body {
+  margin: 0;
+  background: #f3f5f7;
+  color: var(--ink);
+}
+
+main {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 24px 16px 64px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 28px;
+}
+
+.tagline {
+  margin: 4px 0 20px;
+  color: var(--muted);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 16px;
+}
+
+.controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.controls select {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  font-size: 14px;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: white;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.status {
+  font-weight: 600;
+  margin: 12px 0;
+}
+
+.status.over {
+  color: var(--accent);
+}
+
+.layout {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.board {
+  display: grid;
+  grid-template-columns: repeat(var(--cols), var(--cell));
+  gap: 2px;
+  background: #b8c4cf;
+  padding: 6px;
+  border-radius: 8px;
+  width: max-content;
+}
+
+.board button.cell {
+  width: var(--cell);
+  height: var(--cell);
+  font-size: calc(var(--cell) * 0.5);
+  line-height: 1;
+  padding: 0;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.board button.cell.disabled {
+  cursor: default;
+}
+
+.board button.cell.target {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(43, 108, 176, 0.35);
+  cursor: pointer;
+}
+
+.board button.cell.movable:hover {
+  border-color: var(--accent);
+  cursor: pointer;
+}
+
+.board button.cell.selected {
+  outline: 2px solid var(--accent);
+}
+
+/* chess palette */
+.ch-light { background: #f0e7d4; color: #222; }
+.ch-dark  { background: #a98b62; color: #fff; }
+.ch-piece-b { color: #0f1418; }
+
+/* xiangqi */
+.xq-light  { background: #f5e4c3; }
+.xq-river  { background: #eddeb8; }
+.xq-piece-red   { color: #b02020; font-weight: 700; }
+.xq-piece-black { color: #1c2430; font-weight: 700; }
+
+/* connect four */
+.c4-empty { background: #e8ecf0; border-radius: 50%; }
+.c4-red   { background: #d23f3f; color: white; border-radius: 50%; }
+.c4-yellow{ background: #e8c53a; color: #222; border-radius: 50%; }
+.c4-red.winline, .c4-yellow.winline { outline: 3px solid var(--accent); }
+
+/* reversi */
+.oth-empty { background: #3a7d44; }
+.oth-black, .oth-white { background: #3a7d44; }
+.oth-black { color: #10161c; font-size: calc(var(--cell) * 0.62); font-weight: 800; }
+.oth-white { color: #f6f6f2; font-size: calc(var(--cell) * 0.62); font-weight: 800; }
+
+/* sequence */
+.sq-space { background: #fff; font-size: calc(var(--cell) * 0.52); font-weight: 700; }
+.sq-corner { background: #efe3c8; }
+.sq-p1 { background: #2b6cb0; color: white; border-radius: 50%; }
+.sq-p2 { background: #b02020; color: white; border-radius: 50%; }
+.sq-locked { outline: 2px solid #8a6d1f; }
+
+/* sudoku */
+.sud-light { background: #fff; }
+.sud-dark  { background: #f3f6f9; }
+.sud-given { background: #e7e2d6; font-weight: 700; }
+
+.cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  max-width: 440px;
+}
+
+.cards button.card {
+  padding: 8px 10px;
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+}
+
+.cards button.card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(43, 108, 176, 0.35);
+}
+
+.cards button.card.wild { background: #eaf4ea; }
+.cards button.card.remover { background: #f9ecec; }
+
+.digits, .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.digits button, .actions button {
+  min-width: 40px;
+}
+
+.panel {
+  flex: 1;
+  min-width: 220px;
+  max-width: 320px;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.panel h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.panel pre {
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--muted);
+  margin: 0;
+}
+
+.thinking {
+  color: var(--accent);
+  font-size: 13px;
+  margin: 12px 0 0;
+}
