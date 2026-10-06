@@ -2,16 +2,40 @@
 
 This contains everything you need to run your app locally.
 
+## Prerequisites
+
+- Node.js 20 or newer (Vite 6 supports Node 18, 20, and 22+). Check with
+  `node --version`.
+- An npm-compatible package manager (npm ships with Node).
+
+## npm scripts
+
+| Script          | Command         | Description                                      |
+| --------------- | --------------- | ------------------------------------------------ |
+| `npm run dev`   | `vite`          | Start the dev server with hot reload.            |
+| `npm run build` | `vite build`    | Build an optimized production bundle to `dist/`. |
+| `npm run preview` | `vite preview` | Serve the built bundle from `dist/` locally.    |
+
 ## Run Locally
-
-**Prerequisites:**  Node.js
-
 
 1. Install dependencies:
    `npm install`
 2. Copy [.env.local.example](.env.local.example) to `.env.local` and set `GEMINI_API_KEY` to your Gemini API key (get one at https://aistudio.google.com/apikey)
 3. Run the app:
    `npm run dev`
+
+## Production build
+
+`npm run build` outputs static files to `dist/`. Because the app is a static
+bundle, deploy `dist/` to any static host. You can verify the build locally
+with `npm run preview`. The API key is baked in at build time - see the
+Security notes below.
+
+## Troubleshooting
+
+- **API calls fail / key errors**: make sure `.env.local` exists next to
+  `package.json` and contains a valid `GEMINI_API_KEY=` value. Restart the
+  dev server after changing it; Vite only reads `.env.local` at startup.
 
 ## Security notes
 

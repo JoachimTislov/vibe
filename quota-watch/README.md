@@ -8,6 +8,10 @@ supported tools automatically; users never copy usage numbers by hand.
 
 ## Development
 
+Requires Go 1.24 or newer (see `go.mod`). The module has no third-party
+dependencies, so builds and tests run offline from the standard library alone
+and need no `go mod download` step.
+
 ```sh
 go run ./cmd/quota-watch
 # Or preview every UI state without reading credentials or making network calls:
@@ -15,6 +19,16 @@ go run ./cmd/quota-watch --demo
 ```
 
 Then open <http://127.0.0.1:7331>.
+
+Common tasks are wrapped in the Makefile:
+
+```sh
+make build   # compile ./quota-watch from ./cmd/quota-watch
+make test    # go test ./...
+make lint    # go vet ./...
+make run     # go run ./cmd/quota-watch
+make demo    # go run ./cmd/quota-watch --demo
+```
 
 ## Automatic integrations
 
